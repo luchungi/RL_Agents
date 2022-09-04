@@ -34,7 +34,9 @@ class REINFORCE_Agent:
             )
         self.p.to(self.device)
 
-        if not self.discrete: self.logstd = nn.Parameter(torch.ones(self.num_actions, dtype=torch.float32) * -0.01)
+        # log std of distribution used for stochastic continuous action with zero covariance between actions
+        if not self.discrete: self.logstd = nn.Parameter(torch.ones(self.num_actions, dtype=torch.float32) * -0.01) 
+        
         self.p_optimizer = torch.optim.Adam(self.p.parameters(), lr=self.step_size)
 
         try:
@@ -89,6 +91,7 @@ class REINFORCE_Agent:
             logits = self.p(observation)
             action_dist = torch.distributions.Categorical(logits=logits)
         else:
+            # multivariate normal distribution with zero covariance used for stochastic continuous action
             batch_mean = self.p(observation)
             scale_tril = torch.diag(torch.exp(self.logstd)).to(self.device)
             batch_dim = batch_mean.shape[0]
