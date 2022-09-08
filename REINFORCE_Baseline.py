@@ -4,6 +4,15 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 class REINFORCE_Agent:
+    '''
+    Implementation of REINFORCE with state dependent baseline using neural network
+    Action output can be discrete or continuous based on stochastic policy
+    Categorial distribution used for discrete actions 
+    Multivariate Gaussian for continuous with diagonal cov matrix
+    Causality variable switches full episode rewards to rewards to go in policy gradient
+    Baseline variable switches on/off inclusion of the baseline in policy gradient
+    '''
+
     def agent_init(self, agent_init_info):
         # Store the parameters provided in agent_init_info.
         self.num_actions = agent_init_info['num_actions']

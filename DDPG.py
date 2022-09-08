@@ -8,6 +8,17 @@ import numpy as np
 import copy
 
 class DDPG_Agent:
+    '''
+    Implementation of DDPG with actor-critic
+    Determininistic policy with Gaussian noise added
+    train_steps controls # of steps between training iterations
+    n_batches controls # of batches to train in each training iteration
+    n_update_target_steps controls # of steps between soft updating of target networks
+    soft_param controls speed of soft updating of target network
+    sigma controls standard deviation of the noise added to action
+    clip_gradients controls whether to clip the gradient to [-clip_value, clip_value]
+    softmax controls whether to use softmax on the action (post noise addition)
+    '''
     def agent_init(self, agent_init_info):
         # Store the parameters provided in agent_init_info.
         self.num_actions = agent_init_info['num_actions']
@@ -19,8 +30,6 @@ class DDPG_Agent:
         self.batch_size = agent_init_info['batch_size'] # num of steps
         self.train_steps = agent_init_info['train_steps']
         self.n_batches = agent_init_info['n_batches']
-        self.n_critic_steps = agent_init_info['n_critic_steps']
-        self.n_actor_steps = agent_init_info['n_critic_steps']
         self.update_target_steps = agent_init_info['update_target_steps']
         self.soft_param = agent_init_info['soft_param']
         self.sigma = torch.tensor(agent_init_info['sigma'])
@@ -101,7 +110,7 @@ class DDPG_Agent:
         else: noise = torch.zeros(self.num_actions) # noise only when interacting with environment in training mode
         noise = noise.to(self.device)
         assert action.shape == noise.shape, str(action.shape) + str(noise.shape)
-        if self.softmax: return F.relu(action + noise, dim=-1) # when actions includes risk free asset and adding softmax to remove leverage / shortselling
+        if self.softmax: return F.softmax(action + noise, dim=-1) # when actions includes risk free asset and adding softmax to remove leverage / shortselling
         else: return (action + noise)
 
     def train_mode_actions(self, reward, observation, terminal):

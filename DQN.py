@@ -18,6 +18,18 @@ class BufferDataset(Dataset):
         return current_state, action, rewards, next_state, terminal_state
 
 class DQNAgent:
+    '''
+    Implementation of Double DQN 
+    Policy is implicit using argmax of q-values determined by q-network  
+    clone_steps controls # of steps before target network weights are updated to most recent q-network weights
+    train_steps controls # of steps between each training iteration
+    n_epochs controls # of epochs for each training iteration
+    n_batches controls # of batches to train in each epoch
+    clip gradients controls whether to clip gradient to [-1,1]
+    greedy controls whether to use episilon greedy
+    epsilon controls the epsilon greedy param
+    training_mode controls whether to switch off update buffer, target network and train q-network    
+    '''
     def agent_init(self, agent_init_info):
         ''' Store the parameters provided in agent_init_info. '''
         self.num_actions = agent_init_info['num_actions']
