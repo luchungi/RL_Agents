@@ -3,6 +3,57 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+class Feature_Extractor(nn.Module):
+    def __init__(self, input_size, activation_fn=nn.Tanh()):
+        super(Feature_Extractor, self).__init__()
+        self.net = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(input_size, 64),
+            activation_fn,
+            nn.Linear(64, 64),
+            activation_fn
+        )        
+
+    def forward(self, x):
+        x = self.net(x)
+        return x
+
+class Policy(nn.Module):
+
+    def __init__(self, num_actions, discrete, log_std_init=0.):
+        super(Policy, self).__init__()
+        self.p = nn.Sequential(
+            nn.Linear(64, num_actions)
+        )
+        self.discrete = discrete
+        self.log_std = nn.Parameter(torch.zeros(num_actions, dtype=torch.float32) + log_std_init)        
+
+    def forward(self, x):
+        if self.discrete:
+            logits = self.p(x)
+            action_dist = torch.distributions.Categorical(logits=logits)
+        else:
+            batch_mean = self.p(x)
+            scale_tril = torch.diag(torch.exp(self.log_std))
+            batch_dim = batch_mean.shape[0]
+            batch_scale_tril = scale_tril.repeat(batch_dim, 1, 1)
+            action_dist = torch.distributions.MultivariateNormal(batch_mean, 
+                                                        scale_tril=batch_scale_tril)
+
+        return action_dist
+
+class Baseline(nn.Module):
+
+    def __init__(self):
+        super(Baseline, self).__init__()
+        self.b = nn.Sequential(
+            nn.Linear(64, 1)
+        )
+
+    def forward(self, x):
+        x = self.b(x)
+        return x
+
 class REINFORCE_Agent:
     '''
     Implementation of REINFORCE with state dependent baseline using neural network
@@ -26,39 +77,33 @@ class REINFORCE_Agent:
         self.standardise = agent_init_info['standardise']
         self.discrete = agent_init_info['discrete']
         self.device = agent_init_info['device']
+        self.log_std_init = agent_init_info['log_std_init']        
         self.rng = np.random.default_rng()      
         self.training_mode = True
 
         try:
+            self.fe = agent_init_info['feature_extraction_model']
+        except:
+            self.fe = Feature_Extractor(self.obs_size)
+
+        try:
             self.p = agent_init_info['policy_model']
         except:            
+            policy = Policy(self.num_actions, self.discrete, self.log_std_init)
             self.p = nn.Sequential(
-                nn.Linear(self.obs_size, 64),
-                nn.ReLU(),
-                nn.Linear(64, 64),
-                nn.ReLU(),
-                nn.Linear(64, 32),
-                nn.ReLU(),
-                nn.Linear(32, self.num_actions)
+                self.fe,
+                policy
             )
         self.p.to(self.device)
-
-        # log std of distribution used for stochastic continuous action with zero covariance between actions
-        if not self.discrete: self.logstd = nn.Parameter(torch.zeros(self.num_actions, dtype=torch.float32)) 
-        
         self.p_optimizer = torch.optim.Adam(self.p.parameters(), lr=self.step_size)
 
         try:
             self.q = agent_init_info['baseline_model']
         except:
+            baseline = Baseline()
             self.q = nn.Sequential(
-                nn.Linear(self.obs_size + self.num_actions, 64),
-                nn.ReLU(),
-                nn.Linear(64, 64),
-                nn.ReLU(),
-                nn.Linear(64, 32),
-                nn.ReLU(),
-                nn.Linear(32, 1),
+                self.fe,
+                baseline
             )
         self.q.to(self.device)
         self.q_optimizer = torch.optim.Adam(self.q.parameters(), lr=self.step_size)
@@ -96,17 +141,7 @@ class REINFORCE_Agent:
     def get_action(self, observation, return_dist=False, batched=False):
         if not batched: observation = torch.tensor(observation[np.newaxis,...], dtype=torch.float32)
         observation = observation.to(self.device)
-        if self.discrete:
-            logits = self.p(observation)
-            action_dist = torch.distributions.Categorical(logits=logits)
-        else:
-            # multivariate normal distribution with zero covariance used for stochastic continuous action
-            batch_mean = self.p(observation)
-            scale_tril = torch.diag(torch.exp(self.logstd)).to(self.device)
-            batch_dim = batch_mean.shape[0]
-            batch_scale_tril = scale_tril.repeat(batch_dim, 1, 1)
-            action_dist = torch.distributions.MultivariateNormal(batch_mean, 
-                                                        scale_tril=batch_scale_tril)
+        action_dist = self.p(observation)
         if return_dist:
             return action_dist
         else:
