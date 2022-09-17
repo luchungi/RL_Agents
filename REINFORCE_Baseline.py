@@ -27,7 +27,7 @@ class REINFORCE_Agent:
         self.discrete = agent_init_info['discrete']
         self.device = agent_init_info['device']
         self.rng = np.random.default_rng()      
-        self.training_mode = True          
+        self.training_mode = True
 
         try:
             self.p = agent_init_info['policy_model']
@@ -44,9 +44,9 @@ class REINFORCE_Agent:
         self.p.to(self.device)
 
         # log std of distribution used for stochastic continuous action with zero covariance between actions
-        if not self.discrete: self.logstd = nn.Parameter(torch.ones(self.num_actions, dtype=torch.float32) * -0.01) 
+        if not self.discrete: self.logstd = nn.Parameter(torch.ones(self.num_actions, dtype=torch.float32)) 
         
-        self.p_optimizer = torch.optim.Adam(self.p.parameters(), lr=self.step_size)
+        self.p_optimizer = torch.optim.Adam(list(self.p.parameters()) +list(self.logstd), lr=self.step_size)
 
         try:
             self.q = agent_init_info['baseline_model']
