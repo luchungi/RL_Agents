@@ -20,27 +20,15 @@ class Feature_Extractor(nn.Module):
 
 class Policy(nn.Module):
 
-    def __init__(self, num_actions, discrete, log_std_init=0.):
+    def __init__(self, num_actions):
         super(Policy, self).__init__()
         self.p = nn.Sequential(
             nn.Linear(64, num_actions)
-        )
-        self.discrete = discrete
-        self.log_std = nn.Parameter(torch.zeros(num_actions, dtype=torch.float32) + log_std_init)        
+        )     
 
     def forward(self, x):
-        if self.discrete:
-            logits = self.p(x)
-            action_dist = torch.distributions.Categorical(logits=logits)
-        else:
-            batch_mean = self.p(x)
-            scale_tril = torch.diag(torch.exp(self.log_std))
-            batch_dim = batch_mean.shape[0]
-            batch_scale_tril = scale_tril.repeat(batch_dim, 1, 1)
-            action_dist = torch.distributions.MultivariateNormal(batch_mean, 
-                                                        scale_tril=batch_scale_tril)
-
-        return action_dist
+        x = self.p(x)
+        return x
 
 class Baseline(nn.Module):
 
@@ -77,7 +65,9 @@ class REINFORCE_Agent:
         self.standardise = agent_init_info['standardise']
         self.discrete = agent_init_info['discrete']
         self.device = agent_init_info['device']
-        self.log_std_init = agent_init_info['log_std_init']        
+        self.log_std_init = agent_init_info['log_std_init']
+        self.log_std_annealing_rate = agent_init_info['log_std_annealing_rate']
+        self.log_std_lr = agent_init_info['log_std_lr']
         self.rng = np.random.default_rng()      
         self.training_mode = True
 
@@ -89,13 +79,17 @@ class REINFORCE_Agent:
         try:
             self.p = agent_init_info['policy_model']
         except:            
-            policy = Policy(self.num_actions, self.discrete, self.log_std_init)
+            policy = Policy(self.num_actions)
             self.p = nn.Sequential(
                 self.fe,
                 policy
             )
         self.p.to(self.device)
         self.p_optimizer = torch.optim.Adam(self.p.parameters(), lr=self.step_size)
+
+        if not self.discrete: 
+            self.log_std = nn.Parameter(torch.zeros(self.num_actions, dtype=torch.float32) + self.log_std_init)
+        self.log_std_optim = torch.optim.Adam([self.log_std], lr=self.log_std_lr)
 
         try:
             self.q = agent_init_info['baseline_model']
@@ -141,7 +135,17 @@ class REINFORCE_Agent:
     def get_action(self, observation, return_dist=False, batched=False):
         if not batched: observation = torch.tensor(observation[np.newaxis,...], dtype=torch.float32)
         observation = observation.to(self.device)
-        action_dist = self.p(observation)
+        if self.discrete:
+            logits = self.p(observation)
+            action_dist = torch.distributions.Categorical(logits=logits)
+        else:
+            # multivariate normal distribution with zero covariance used for stochastic continuous action
+            batch_mean = self.p(observation)
+            scale_tril = torch.diag(torch.exp(self.log_std)).to(self.device)
+            batch_dim = batch_mean.shape[0]
+            batch_scale_tril = scale_tril.repeat(batch_dim, 1, 1)
+            action_dist = torch.distributions.MultivariateNormal(batch_mean, 
+                                                        scale_tril=batch_scale_tril)
         if return_dist:
             return action_dist
         else:
@@ -192,8 +196,12 @@ class REINFORCE_Agent:
         
         loss = -torch.sum(advantages * log_prob) # policy gradient for stochastic policy
         self.p_optimizer.zero_grad()
+        self.log_std_optim.zero_grad()
         loss.backward()
         self.p_optimizer.step()
+        self.log_std_optim.step()
+        with torch.no_grad():
+            self.log_std += self.log_std_annealing_rate
 
         if self.baseline: self.train_baseline(q_values, obs)
         del obs, actions, q_values, advantages, action_dist, log_prob, loss
