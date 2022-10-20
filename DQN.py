@@ -17,7 +17,7 @@ class BufferDataset(Dataset):
         current_state, action, rewards, next_state, terminal_state = self.dataset[idx]      
         return current_state, action, rewards, next_state, terminal_state
 
-class DQNAgent:
+class DQN_Agent:
     '''
     Implementation of Double DQN 
     Policy is implicit using argmax of q-values determined by q-network  

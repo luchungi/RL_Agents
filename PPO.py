@@ -5,7 +5,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.tensorboard import SummaryWriter
 
-class PPOAgent:
+class PPO_Agent:
     def __init__(self, n_actions, obs_size, discrete,
         discount=0.99, gae_lambda=0.95,
         log_std_init=0.0, log_std_annealing_rate=-0.001, log_std_lr=0.001,
