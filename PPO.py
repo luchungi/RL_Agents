@@ -8,7 +8,7 @@ from torch.utils.tensorboard import SummaryWriter
 class PPO_Agent:
     def __init__(self, n_actions, obs_size, discrete,
         discount=0.99, gae_lambda=0.95,
-        log_std_init=0.0, log_std_annealing_rate=-0.001, log_std_lr=0.001,
+        log_std_init=0.0, log_std_annealing_rate=-0.001, log_std_lr=0.0001,
         batch_size=64, train_steps=2048, n_epochs=10,
         total_steps=None, scheduler_steps=None,
         learning_rate=0.0003, clip_param=0.2, max_grad_norm=0.5,
