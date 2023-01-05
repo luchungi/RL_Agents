@@ -27,30 +27,45 @@ class DDPG_Agent:
         self.critic_lr = agent_init_info['critic_lr']
         self.discount = agent_init_info['discount']
         self.buffer_max_length = agent_init_info['buffer_max_length'] # num of steps
-        self.batch_size = agent_init_info['batch_size'] # num of steps
-        self.train_steps = agent_init_info['train_steps']
-        self.n_batches = agent_init_info['n_batches']
+        self.batch_size = agent_init_info['batch_size']     # num of steps
+        self.train_steps = agent_init_info['train_steps']   # num of steps between updates
+        self.n_batches = agent_init_info['n_batches']       # num of batches per update step
         self.update_target_steps = agent_init_info['update_target_steps']
         self.soft_param = agent_init_info['soft_param']
         self.sigma = torch.tensor(agent_init_info['sigma'])
         self.clip_gradients = agent_init_info['clip_gradients']
-        self.clip_value = agent_init_info['clip_value']
+        if self.clip_gradients: self.clip_value = agent_init_info['clip_value']
         self.device = agent_init_info['device']
-        self.softmax = agent_init_info['softmax']
-        self.rng = np.random.default_rng()        
+        self.rng = np.random.default_rng()
+
+        self.debug_mode = False
+
+        try: self.standardise = agent_init_info['standardise']
+        except: self.standardise = True
+
+        try: self.baseline = agent_init_info['baseline']
+        except: self.baseline = False
+
+        try: self.softmax = agent_init_info['softmax']
+        except: self.softmax = False
+
+        try:
+            self.action_limit_value = agent_init_info['action_limit_value']
+            self.action_limit = True
+        except:
+            self.action_limit = False
+
+        if self.softmax == True and self.action_limit == True:
+            raise Exception('Cannot use softmax with action limits')
 
         try: self.actor = agent_init_info['actor_model']
         except:
             self.actor = nn.Sequential(
                 nn.Linear(self.obs_size, 64),
-                nn.ReLU(),
-                nn.Linear(64, 128),
-                nn.ReLU(),
-                nn.Linear(128, 64),
-                nn.ReLU(),
-                nn.Linear(64, 32),
-                nn.ReLU(),                
-                nn.Linear(32, self.num_actions)
+                nn.Tanh(),
+                nn.Linear(64, 64),
+                nn.Tanh(),
+                nn.Linear(64, self.num_actions)
             )
         self.target_actor = copy.deepcopy(self.actor)
         self.actor.to(self.device)
@@ -58,22 +73,31 @@ class DDPG_Agent:
         self.actor_optimizer = torch.optim.Adam(self.actor.parameters(), lr=self.actor_lr)
 
         try: self.critic = agent_init_info['critic_model']
-        except: self.critic = nn.Sequential(
+        except:
+            self.critic = nn.Sequential(
                 nn.Linear(self.obs_size + self.num_actions, 64),
-                nn.ReLU(),
-                nn.Linear(64, 128),
-                nn.ReLU(),
-                nn.Linear(128, 64),
-                nn.ReLU(),
-                nn.Linear(64, 32),
-                nn.ReLU(),
-                nn.Linear(32, 1),
+                nn.Tanh(),
+                nn.Linear(64, 64),
+                nn.Tanh(),
+                nn.Linear(64, 1),
             )
         self.target_critic = copy.deepcopy(self.critic)
         self.critic_optimizer = torch.optim.Adam(self.critic.parameters(), lr=self.critic_lr) #, weight_decay=0.01) # WEIGHT DECAY CAUSES LEARNING ISSUES WITH MOUNTAIN CAR
         self.critic.to(self.device)
         self.target_critic.to(self.device)
         self.critic_loss_fn = nn.MSELoss()
+
+        if self.baseline:
+            self.baseline_model = nn.Sequential(
+                nn.Linear(self.obs_size, 64),
+                nn.Tanh(),
+                nn.Linear(64, 64),
+                nn.Tanh(),
+                nn.Linear(64, 1)
+            )
+            self.baseline_optimizer = torch.optim.Adam(self.baseline_model.parameters(), lr=self.critic_lr)
+            self.baseline_loss_fn = nn.MSELoss()
+            self.baseline_model.to(self.device)
 
         self.training_mode = True
         self.steps = 0
@@ -87,6 +111,7 @@ class DDPG_Agent:
         action = self.get_action(observation)
         self.prev_state = observation
         self.prev_action = action
+        if self.debug_mode: print('Action:', action)
         return action.cpu().detach().numpy()
 
     def agent_step(self, reward, observation):
@@ -97,6 +122,7 @@ class DDPG_Agent:
         action = self.get_action(observation)
         self.prev_state = observation
         self.prev_action = action
+        if self.debug_mode: print('Action:', action)
         return action.cpu().detach().numpy()
 
     def agent_end(self, reward, observation):
@@ -111,6 +137,7 @@ class DDPG_Agent:
         noise = noise.to(self.device)
         assert action.shape == noise.shape, str(action.shape) + str(noise.shape)
         if self.softmax: return F.softmax(action + noise, dim=-1) # when actions includes risk free asset and adding softmax to remove leverage / shortselling
+        elif self.action_limit: return F.tanh(action + noise) * self.action_limit_value
         else: return (action + noise)
 
     def train_mode_actions(self, reward, observation, terminal):
@@ -128,9 +155,9 @@ class DDPG_Agent:
                 target_param.data = (1-t) * target_param.data + t * param.data
 
     def update_target_net_condition(self):
-        bool_step_multiple = (self.steps % self.update_target_steps == 0)        
+        bool_step_multiple = (self.steps % self.update_target_steps == 0)
         return bool_step_multiple and self.batch_in_buffer
-    
+
     def training_condition(self):
         bool_step_multiple = (self.steps % self.train_steps == 0)
         return bool_step_multiple and self.batch_in_buffer
@@ -138,31 +165,31 @@ class DDPG_Agent:
     def add_to_replay_buffer(self, reward, observation, terminal):
         terminal_state = torch.tensor([terminal], dtype=torch.bool)
         transition = (self.prev_state, self.prev_action, reward, observation, terminal_state)
-        if self.buffer_filled: 
+        if self.buffer_filled:
             self.buffer.popleft()
             self.buffer.append(transition)
         else:
             self.buffer.append(transition)
-            if len(self.buffer) == self.buffer_max_length: 
-                self.buffer_filled = True        
+            if len(self.buffer) == self.buffer_max_length:
+                self.buffer_filled = True
         if not self.batch_in_buffer:
             if len(self.buffer) >= self.batch_size: self.batch_in_buffer = True
 
-    def sample_batch(self): return [torch.stack(i, dim=0) for i in [*zip(*random.sample(self.buffer, self.batch_size))]]        
+    def sample_batch(self): return [torch.stack(i, dim=0) for i in [*zip(*random.sample(self.buffer, self.batch_size))]]
 
     def train(self):
         current_states, actions, rewards, next_states, terminal_state = self.sample_batch()
         not_terminal = torch.logical_not(terminal_state)
         self.train_batch(current_states, actions, rewards, next_states, not_terminal)
- 
+
     def train_batch(self, current_states, actions, rewards, next_states, not_terminal):
         current_states, actions, rewards, next_states, not_terminal = self.to_device([current_states, actions, rewards, next_states, not_terminal])
-        self.train_critic(current_states, actions, rewards, next_states, not_terminal) 
+        self.train_critic(current_states, actions, rewards, next_states, not_terminal)
         self.train_actor(current_states)
 
     def train_critic(self, current_states, actions, rewards, next_states, not_terminal):
         # compute targets = reward + gamma * target_q(next_state, action) where action = max(q(next_state)) i.e. double Q-learning
-        with torch.no_grad(): 
+        with torch.no_grad():
             next_actions = self.target_actor(next_states)
             next_state_q = self.target_critic(torch.cat([next_states, next_actions], dim=-1))
         targets = (rewards + self.discount * next_state_q * not_terminal)
@@ -176,17 +203,54 @@ class DDPG_Agent:
         loss.backward()
         if self.clip_gradients: torch.nn.utils.clip_grad_value_(self.critic.parameters(), self.clip_value)
         self.critic_optimizer.step()
+        if self.debug_mode: print('Critic loss:', loss.mean().item())
+
+        # train baseline
+        if self.baseline:
+            with torch.no_grad():
+                next_state_v = self.baseline_model(next_states)
+            baseline_targets = (rewards + self.discount * next_state_v * not_terminal)
+            baseline = self.baseline_model(current_states)
+
+            baseline_loss = self.baseline_loss_fn(baseline_targets, baseline)
+            self.baseline_optimizer.zero_grad()
+            baseline_loss.backward()
+            if self.clip_gradients: torch.nn.utils.clip_grad_value_(self.baseline_model.parameters(), self.clip_value)
+            self.baseline_optimizer.step()
+            if self.debug_mode: print('Baseline loss:', baseline_loss.mean().item())
+
         return loss
 
     # Refer to DPG paper for proof of the deterministic policy gradient
     def train_actor(self, current_states):
         actions = self.actor(current_states) # No noise for calculate critic value for training actor
         q_values = self.critic(torch.cat([current_states, actions], dim=-1))
-        loss = -torch.mean(q_values)
+        advantages = self.calculate_advantages(q_values, current_states).to(self.device)
+        if self.debug_mode: print('Adv values:', advantages.mean().item())
+        loss = -torch.mean(advantages)
         self.actor_optimizer.zero_grad()
         loss.backward()
         if self.clip_gradients: torch.nn.utils.clip_grad_value_(self.actor.parameters(), self.clip_value)
         self.actor_optimizer.step()
+
+    def calculate_advantages(self, q_values, obs=None):
+        # Computes advantages by (possibly) using GAE, or subtracting a baseline from the estimated Q values
+
+        if self.baseline:
+            with torch.no_grad(): values_unnormalized = self.baseline_model(obs).cpu()
+            ## ensure that the value predictions and q_values have the same dimensionality
+            ## to prevent silent broadcasting errors
+            assert values_unnormalized.shape == q_values.shape, (values_unnormalized.shape, q_values.shape)
+            ## values were trained with standardized q_values, so ensure
+                ## that the predictions have the same mean and standard deviation as
+                ## the current batch of q_values
+            values = values_unnormalized * torch.std(q_values) + q_values.mean()
+            advantages = q_values - values
+        else:
+            advantages = q_values.copy()
+
+        if self.standardise: advantages = (advantages - advantages.mean()) / (torch.std(advantages) + 0.0001)
+        return advantages
 
     def to_device(self, list):
         device_var = []
