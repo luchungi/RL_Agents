@@ -12,7 +12,7 @@ class Feature_Extractor(nn.Module):
             activation_fn,
             nn.Linear(64, 64),
             activation_fn
-        )        
+        )
 
     def forward(self, x):
         x = self.net(x)
@@ -24,7 +24,7 @@ class Policy(nn.Module):
         super(Policy, self).__init__()
         self.p = nn.Sequential(
             nn.Linear(64, num_actions)
-        )     
+        )
 
     def forward(self, x):
         x = self.p(x)
@@ -46,8 +46,9 @@ class REINFORCE_Agent:
     '''
     Implementation of REINFORCE with state dependent baseline using neural network
     Action output can be discrete or continuous based on stochastic policy
-    Categorial distribution used for discrete actions 
+    Categorial distribution used for discrete actions
     Multivariate Gaussian for continuous with diagonal cov matrix
+    Q values are based on Monte Carlo estimates of the return
     Causality variable switches full episode rewards to rewards to go in policy gradient
     Baseline variable switches on/off inclusion of the baseline in policy gradient
     '''
@@ -55,7 +56,7 @@ class REINFORCE_Agent:
     def agent_init(self, agent_init_info):
         # Store the parameters provided in agent_init_info.
         self.num_actions = agent_init_info['num_actions']
-        self.obs_size = agent_init_info['obs_size']        
+        self.obs_size = agent_init_info['obs_size']
         self.step_size = agent_init_info['step_size']
         self.discount = agent_init_info['discount']
         self.buffer_max_length = agent_init_info['buffer_max_length'] # number of episodes
@@ -68,7 +69,7 @@ class REINFORCE_Agent:
         self.log_std_init = agent_init_info['log_std_init']
         self.log_std_annealing_rate = agent_init_info['log_std_annealing_rate']
         self.log_std_lr = agent_init_info['log_std_lr']
-        self.rng = np.random.default_rng()      
+        self.rng = np.random.default_rng()
         self.training_mode = True
 
         try:
@@ -78,7 +79,7 @@ class REINFORCE_Agent:
 
         try:
             self.p = agent_init_info['policy_model']
-        except:            
+        except:
             policy = Policy(self.num_actions)
             self.p = nn.Sequential(
                 self.fe,
@@ -87,7 +88,7 @@ class REINFORCE_Agent:
         self.p.to(self.device)
         self.p_optimizer = torch.optim.Adam(self.p.parameters(), lr=self.step_size)
 
-        if not self.discrete: 
+        if not self.discrete:
             self.log_std = nn.Parameter(torch.zeros(self.num_actions, dtype=torch.float32) + self.log_std_init)
         self.log_std_optim = torch.optim.Adam([self.log_std], lr=self.log_std_lr)
 
@@ -144,7 +145,7 @@ class REINFORCE_Agent:
             scale_tril = torch.diag(torch.exp(self.log_std)).to(self.device)
             batch_dim = batch_mean.shape[0]
             batch_scale_tril = scale_tril.repeat(batch_dim, 1, 1)
-            action_dist = torch.distributions.MultivariateNormal(batch_mean, 
+            action_dist = torch.distributions.MultivariateNormal(batch_mean,
                                                         scale_tril=batch_scale_tril)
         if return_dist:
             return action_dist
@@ -152,7 +153,7 @@ class REINFORCE_Agent:
             return action_dist.sample().cpu()
 
     def add_to_buffer(self):
-        self.steps += len(self.episode_obs)       
+        self.steps += len(self.episode_obs)
         self.buffer.append((self.episode_obs, self.episode_actions, self.episode_rewards))
         if len(self.buffer) > self.buffer_max_length:
             self.buffer.pop(0)
@@ -186,14 +187,14 @@ class REINFORCE_Agent:
         obs = torch.tensor(obs, dtype=torch.float32)
         actions = torch.tensor(actions, dtype=torch.float32)
         obs, actions = self.to_device([obs, actions])
-        
+
         q_values = torch.tensor(self.calculate_q_values(rewards), dtype=torch.float32)
         advantages = self.calculate_advantages(q_values, obs).to(self.device)
 
         action_dist = self.get_action(obs, return_dist=True, batched=True)
         log_prob = action_dist.log_prob(actions)
         assert log_prob.shape == advantages.shape
-        
+
         loss = -torch.sum(advantages * log_prob) # policy gradient for stochastic policy
         self.p_optimizer.zero_grad()
         self.log_std_optim.zero_grad()
@@ -206,7 +207,7 @@ class REINFORCE_Agent:
         if self.baseline: self.train_baseline(q_values, obs)
         del obs, actions, q_values, advantages, action_dist, log_prob, loss
 
-    def train_baseline(self, targets, obs):  
+    def train_baseline(self, targets, obs):
         pred = self.q(obs).squeeze()
         loss = self.loss_fn(pred, targets.to(self.device))
         self.q_optimizer.zero_grad()
@@ -237,9 +238,9 @@ class REINFORCE_Agent:
 
         return np.array(list_of_discounted_cumsums)
 
-    def calculate_q_values(self, rewards): 
+    def calculate_q_values(self, rewards):
         # Monte Carlo estimation of the Q function
-  
+
         if self.causality:
             # Case 1: reward-to-go PG
             # Estimate Q^{pi}(s_t, a_t) by the discounted sum of rewards starting from t
@@ -249,10 +250,10 @@ class REINFORCE_Agent:
             # Estimate Q^{pi}(s_t, a_t) by the total discounted reward summed over entire trajectory
             q_values = np.concatenate([self.discounted_return(episode_rewards) for episode_rewards in rewards])
         return q_values
-    
+
     def calculate_advantages(self, q_values, obs=None):
         # Computes advantages by (possibly) using GAE, or subtracting a baseline from the estimated Q values
-        
+
         if self.baseline:
             values_unnormalized = self.q(obs).squeeze().cpu()
             ## ensure that the value predictions and q_values have the same dimensionality
