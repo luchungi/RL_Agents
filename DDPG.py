@@ -10,14 +10,22 @@ import copy
 class DDPG_Agent:
     '''
     Implementation of DDPG with actor-critic
-    Determininistic policy with Gaussian noise added
-    train_steps controls # of steps between training iterations
-    n_batches controls # of batches to train in each training iteration
-    n_update_target_steps controls # of steps between soft updating of target networks
-    soft_param controls speed of soft updating of target network
-    sigma controls standard deviation of the noise added to action
-    clip_gradients controls whether to clip the gradient to [-clip_value, clip_value]
-    softmax controls whether to use softmax on the action (post noise addition)
+    - Determininistic policy with Gaussian noise added
+    - train_steps controls # of steps between training iterations
+    - n_batches controls # of batches to train in each training iteration
+    - n_update_target_steps controls # of steps between soft updating of target networks
+    - soft_param controls speed of soft updating of target network
+    - sigma controls standard deviation of the noise added to action
+    - the noise is only added during training mode
+    - clip_gradients controls whether to clip the gradient to [-clip_value, clip_value]
+    - softmax controls whether to use softmax on the action (post noise addition)
+    - baseline will train a value function based on state to calculate advantage and reduce variance
+    - difficult to implement GAE as it requires calculating the advantage for a full episode rollout
+      which is in conflict with the replay buffer and train during episode style
+    - standardise will normalise the advantage
+    - action limit will add a tanh layer to the output of the actor multiplied by the
+      action limit value i.e. action in range [-value, value]
+    - actor/critic/baseline models default to the PPO NN architecture for better comparison
     '''
     def agent_init(self, agent_init_info):
         # Store the parameters provided in agent_init_info.
