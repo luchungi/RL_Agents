@@ -16,7 +16,8 @@ class DDPG_Agent:
     - n_batches controls # of batches to train in each training iteration
     - n_update_target_steps controls # of steps between soft updating of target networks
     - soft_param controls speed of soft updating of target network
-    - log_std_init controls standard deviation of the noise added to action which is trainable
+    - sigma controls standard deviation of the noise added to action
+    - end_sigma controls the final value of sigma after sigma_steps
     - the noise is only added during training mode
     - clip_gradients controls whether to clip the gradient to [-clip_value, clip_value]
     - softmax controls whether to use softmax on the action (post noise addition)
@@ -32,7 +33,7 @@ class DDPG_Agent:
     def __init__(self, num_actions, obs_size, actor_lr=0.001, critic_lr=0.001, discount=0.99, buffer_max_length=int(1e6),
         batch_size=128, train_steps=8, n_batches=1, update_target_steps=8,
         baseline=True, standardise=True, softmax=False, action_limit=False, action_limit_value=None,
-        soft_param=0.005, log_std_init=-3.0, log_std_lr=0.001, clip_gradients=False, clip_value=None,
+        soft_param=0.005, sigma=0.1, end_sigma=0.1, sigma_steps=None,clip_gradients=False, clip_value=None,
         actor=None, critic=None, baseline_model=None, device='cpu'
     ):
         self.num_actions = num_actions
@@ -46,7 +47,6 @@ class DDPG_Agent:
         self.n_batches = n_batches
         self.update_target_steps = update_target_steps
         self.soft_param = soft_param
-        self.log_std_init = log_std_init
         self.clip_gradients = clip_gradients
         self.clip_value = clip_value
         self.device = device
@@ -73,8 +73,11 @@ class DDPG_Agent:
         self.actor.to(self.device)
         self.target_actor.to(self.device)
         self.actor_optimizer = torch.optim.Adam(self.actor.parameters(), lr=self.actor_lr)
-        self.log_std = nn.Parameter(torch.zeros(self.num_actions, dtype=torch.float32) + self.log_std_init)
-        self.log_std_optimizer = torch.optim.Adam([self.log_std], lr=log_std_lr)
+        self.sigma = sigma
+        if end_sigma != self.sigma:
+            self.sigma_decay = (end_sigma - self.sigma) / sigma_steps
+            self.sigma_steps = sigma_steps
+        else: self.sigma_decay = None
 
         if critic:
             self.critic = critic
@@ -140,12 +143,17 @@ class DDPG_Agent:
 
     def get_action(self, observation):
         with torch.no_grad(): action = self.actor(observation.to(self.device))
-        if self.training_mode: noise = torch.normal(torch.zeros(self.num_actions), torch.exp(self.log_std) * torch.ones(self.num_actions))
-        else: noise = torch.zeros(self.num_actions) # noise only when interacting with environment in training mode
+
+        # add noise only when interacting with environment in training mode
+        if self.training_mode: noise = torch.normal(torch.zeros(self.num_actions), self.sigma * torch.ones(self.num_actions))
+        else: noise = torch.zeros(self.num_actions)
         noise = noise.to(self.device)
         assert action.shape == noise.shape, str(action.shape) + str(noise.shape)
-        if self.softmax: return F.softmax(action + noise, dim=-1) # when actions includes risk free asset and adding softmax to remove leverage / shortselling
-        elif self.action_limit: return F.tanh(action + noise) * self.action_limit_value
+
+         # when actions includes risk free asset and adding softmax to remove leverage / shortselling
+        if self.softmax: return F.softmax(action + noise, dim=-1)
+        # limit action to min/max position based on action_limit_value (from env)
+        elif self.action_limit: return nn.Tanh()(action + noise) * self.action_limit_value
         else: return (action + noise)
 
     def train_mode_actions(self, reward, observation, terminal):
@@ -153,6 +161,7 @@ class DDPG_Agent:
         self.add_to_replay_buffer(reward, observation, terminal)
         if self.training_condition(): self.train()
         if self.update_target_net_condition(): self.update_target_networks()
+        if self.sigma_decay and self.steps < self.sigma_steps: self.sigma += self.sigma_decay
 
     def update_target_networks(self):
         t = self.soft_param
@@ -208,7 +217,7 @@ class DDPG_Agent:
 
         loss = self.critic_loss_fn(targets, current_state_q)
         self.critic_optimizer.zero_grad()
-        loss.backward()
+        loss.backward() # retain graph required if log_std trainable and outside of model
         if self.clip_gradients: torch.nn.utils.clip_grad_value_(self.critic.parameters(), self.clip_value)
         self.critic_optimizer.step()
         if self.debug_mode: print('Critic loss:', loss.mean().item())
@@ -237,11 +246,9 @@ class DDPG_Agent:
         if self.debug_mode: print('Adv values:', advantages.mean().item())
         loss = -torch.mean(advantages)
         self.actor_optimizer.zero_grad()
-        self.log_std_optimizer.zero_grad()
         loss.backward()
         if self.clip_gradients: torch.nn.utils.clip_grad_value_(self.actor.parameters(), self.clip_value)
         self.actor_optimizer.step()
-        self.log_std_optimizer.step()
 
     def calculate_advantages(self, q_values, obs=None):
         # Computes advantages by (possibly) using GAE, or subtracting a baseline from the estimated Q values
