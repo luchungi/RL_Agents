@@ -11,11 +11,12 @@ class DDPG_Agent:
     '''
     Implementation of DDPG with actor-critic
     - Determininistic policy with Gaussian noise added
+    - max buffer length controls the maximum length of the replay buffer in terms of steps
     - train_steps controls # of steps between training iterations
     - n_batches controls # of batches to train in each training iteration
     - n_update_target_steps controls # of steps between soft updating of target networks
     - soft_param controls speed of soft updating of target network
-    - sigma controls standard deviation of the noise added to action
+    - log_std_init controls standard deviation of the noise added to action which is trainable
     - the noise is only added during training mode
     - clip_gradients controls whether to clip the gradient to [-clip_value, clip_value]
     - softmax controls whether to use softmax on the action (post noise addition)
@@ -27,47 +28,40 @@ class DDPG_Agent:
       action limit value i.e. action in range [-value, value]
     - actor/critic/baseline models default to the PPO NN architecture for better comparison
     '''
-    def agent_init(self, agent_init_info):
-        # Store the parameters provided in agent_init_info.
-        self.num_actions = agent_init_info['num_actions']
-        self.obs_size = agent_init_info['obs_size']
-        self.actor_lr = agent_init_info['actor_lr']
-        self.critic_lr = agent_init_info['critic_lr']
-        self.discount = agent_init_info['discount']
-        self.buffer_max_length = agent_init_info['buffer_max_length'] # num of steps
-        self.batch_size = agent_init_info['batch_size']     # num of steps
-        self.train_steps = agent_init_info['train_steps']   # num of steps between updates
-        self.n_batches = agent_init_info['n_batches']       # num of batches per update step
-        self.update_target_steps = agent_init_info['update_target_steps']
-        self.soft_param = agent_init_info['soft_param']
-        self.sigma = torch.tensor(agent_init_info['sigma'])
-        self.clip_gradients = agent_init_info['clip_gradients']
-        if self.clip_gradients: self.clip_value = agent_init_info['clip_value']
-        self.device = agent_init_info['device']
+
+    def __init__(self, num_actions, obs_size, actor_lr=0.001, critic_lr=0.001, discount=0.99, buffer_max_length=int(1e6),
+        batch_size=128, train_steps=8, n_batches=1, update_target_steps=8,
+        baseline=True, standardise=True, softmax=False, action_limit=False, action_limit_value=None,
+        soft_param=0.005, log_std_init=-3.0, log_std_lr=0.001, clip_gradients=False, clip_value=None,
+        actor=None, critic=None, baseline_model=None, device='cpu'
+    ):
+        self.num_actions = num_actions
+        self.obs_size = obs_size
+        self.actor_lr = actor_lr
+        self.critic_lr = critic_lr
+        self.discount = discount
+        self.buffer_max_length = buffer_max_length
+        self.batch_size = batch_size
+        self.train_steps = train_steps
+        self.n_batches = n_batches
+        self.update_target_steps = update_target_steps
+        self.soft_param = soft_param
+        self.log_std_init = log_std_init
+        self.clip_gradients = clip_gradients
+        self.clip_value = clip_value
+        self.device = device
         self.rng = np.random.default_rng()
-
-        self.debug_mode = False
-
-        try: self.standardise = agent_init_info['standardise']
-        except: self.standardise = True
-
-        try: self.baseline = agent_init_info['baseline']
-        except: self.baseline = False
-
-        try: self.softmax = agent_init_info['softmax']
-        except: self.softmax = False
-
-        try:
-            self.action_limit_value = agent_init_info['action_limit_value']
-            self.action_limit = True
-        except:
-            self.action_limit = False
-
+        self.baseline = baseline
+        self.standardise = standardise
+        self.softmax = softmax
+        self.action_limit = action_limit
+        self.action_limit_value = action_limit_value
         if self.softmax == True and self.action_limit == True:
             raise Exception('Cannot use softmax with action limits')
 
-        try: self.actor = agent_init_info['actor_model']
-        except:
+        if actor:
+            self.actor = actor
+        else:
             self.actor = nn.Sequential(
                 nn.Linear(self.obs_size, 64),
                 nn.Tanh(),
@@ -79,9 +73,12 @@ class DDPG_Agent:
         self.actor.to(self.device)
         self.target_actor.to(self.device)
         self.actor_optimizer = torch.optim.Adam(self.actor.parameters(), lr=self.actor_lr)
+        self.log_std = nn.Parameter(torch.zeros(self.num_actions, dtype=torch.float32) + self.log_std_init)
+        self.log_std_optimizer = torch.optim.Adam([self.log_std], lr=log_std_lr)
 
-        try: self.critic = agent_init_info['critic_model']
-        except:
+        if critic:
+            self.critic = critic
+        else:
             self.critic = nn.Sequential(
                 nn.Linear(self.obs_size + self.num_actions, 64),
                 nn.Tanh(),
@@ -96,20 +93,23 @@ class DDPG_Agent:
         self.critic_loss_fn = nn.MSELoss()
 
         if self.baseline:
-            self.baseline_model = nn.Sequential(
-                nn.Linear(self.obs_size, 64),
-                nn.Tanh(),
-                nn.Linear(64, 64),
-                nn.Tanh(),
-                nn.Linear(64, 1)
-            )
+            if baseline_model:
+                self.baseline_model = baseline_model
+            else:
+                self.baseline_model = nn.Sequential(
+                    nn.Linear(self.obs_size, 64),
+                    nn.Tanh(),
+                    nn.Linear(64, 64),
+                    nn.Tanh(),
+                    nn.Linear(64, 1)
+                )
             self.baseline_optimizer = torch.optim.Adam(self.baseline_model.parameters(), lr=self.critic_lr)
             self.baseline_loss_fn = nn.MSELoss()
             self.baseline_model.to(self.device)
 
+        self.debug_mode = False
         self.training_mode = True
         self.steps = 0
-        self.buffer_max_length = agent_init_info['buffer_max_length'] # in terms of steps
         self.buffer = deque(maxlen=self.buffer_max_length)
         self.buffer_filled = False
         self.batch_in_buffer = False
@@ -140,7 +140,7 @@ class DDPG_Agent:
 
     def get_action(self, observation):
         with torch.no_grad(): action = self.actor(observation.to(self.device))
-        if self.training_mode: noise = torch.normal(torch.zeros(self.num_actions), self.sigma * torch.ones(self.num_actions))
+        if self.training_mode: noise = torch.normal(torch.zeros(self.num_actions), torch.exp(self.log_std) * torch.ones(self.num_actions))
         else: noise = torch.zeros(self.num_actions) # noise only when interacting with environment in training mode
         noise = noise.to(self.device)
         assert action.shape == noise.shape, str(action.shape) + str(noise.shape)
@@ -237,9 +237,11 @@ class DDPG_Agent:
         if self.debug_mode: print('Adv values:', advantages.mean().item())
         loss = -torch.mean(advantages)
         self.actor_optimizer.zero_grad()
+        self.log_std_optimizer.zero_grad()
         loss.backward()
         if self.clip_gradients: torch.nn.utils.clip_grad_value_(self.actor.parameters(), self.clip_value)
         self.actor_optimizer.step()
+        self.log_std_optimizer.step()
 
     def calculate_advantages(self, q_values, obs=None):
         # Computes advantages by (possibly) using GAE, or subtracting a baseline from the estimated Q values
