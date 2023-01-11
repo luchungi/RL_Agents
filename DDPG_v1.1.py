@@ -6,19 +6,16 @@ from collections import deque, namedtuple
 import random
 import numpy as np
 import copy
-import time
 
 class DDPG_Agent:
     '''
     Implementation of DDPG with actor-critic
     - Determininistic policy with Gaussian noise added
-    - max buffer length controls the maximum length of the replay buffer in terms of steps
     - train_steps controls # of steps between training iterations
     - n_batches controls # of batches to train in each training iteration
     - n_update_target_steps controls # of steps between soft updating of target networks
     - soft_param controls speed of soft updating of target network
     - sigma controls standard deviation of the noise added to action
-    - end_sigma controls the final value of sigma after sigma_steps
     - the noise is only added during training mode
     - clip_gradients controls whether to clip the gradient to [-clip_value, clip_value]
     - softmax controls whether to use softmax on the action (post noise addition)
@@ -30,18 +27,13 @@ class DDPG_Agent:
       action limit value i.e. action in range [-value, value]
     - actor/critic/baseline models default to the PPO NN architecture for better comparison
     '''
-
     def __init__(self, num_actions, obs_size, actor_lr=0.001, critic_lr=0.001, discount=0.99, buffer_max_length=int(1e6),
         batch_size=128, train_steps=8, n_batches=1, update_target_steps=8,
         baseline=True, standardise=True, softmax=False, action_limit=False, action_limit_value=None,
         soft_param=0.005, sigma=0.1, end_sigma=0.1, sigma_steps=None,clip_gradients=False, clip_value=None,
-        noise_corr=0, actor=None, critic=None, baseline_model=None, device='cpu'
+        actor=None, critic=None, baseline_model=None, device='cpu'
     ):
-
-        self.time1 = 0
-        self.time2 = 0
-        self.time3 = 0
-
+        # Store the parameters provided in agent_init_info.
         self.num_actions = num_actions
         self.obs_size = obs_size
         self.actor_lr = actor_lr
@@ -55,15 +47,18 @@ class DDPG_Agent:
         self.soft_param = soft_param
         self.clip_gradients = clip_gradients
         self.clip_value = clip_value
+        self.sigma = sigma
         self.device = device
         self.rng = np.random.default_rng()
-        self.baseline = baseline
+
+        self.debug_mode = False
+
         self.standardise = standardise
+        self.baseline = baseline
         self.softmax = softmax
         self.action_limit = action_limit
         self.action_limit_value = action_limit_value
-        self.rho = noise_corr
-        self.rng = np.random.default_rng()
+
         if self.softmax == True and self.action_limit == True:
             raise Exception('Cannot use softmax with action limits')
 
@@ -81,11 +76,6 @@ class DDPG_Agent:
         self.actor.to(self.device)
         self.target_actor.to(self.device)
         self.actor_optimizer = torch.optim.Adam(self.actor.parameters(), lr=self.actor_lr)
-        self.sigma = sigma
-        if end_sigma != self.sigma:
-            self.sigma_decay = (end_sigma - self.sigma) / sigma_steps
-            self.sigma_steps = sigma_steps
-        else: self.sigma_decay = None
 
         if critic:
             self.critic = critic
@@ -104,21 +94,17 @@ class DDPG_Agent:
         self.critic_loss_fn = nn.MSELoss()
 
         if self.baseline:
-            if baseline_model:
-                self.baseline_model = baseline_model
-            else:
-                self.baseline_model = nn.Sequential(
-                    nn.Linear(self.obs_size, 64),
-                    nn.Tanh(),
-                    nn.Linear(64, 64),
-                    nn.Tanh(),
-                    nn.Linear(64, 1)
-                )
+            self.baseline_model = nn.Sequential(
+                nn.Linear(self.obs_size, 64),
+                nn.Tanh(),
+                nn.Linear(64, 64),
+                nn.Tanh(),
+                nn.Linear(64, 1)
+            )
             self.baseline_optimizer = torch.optim.Adam(self.baseline_model.parameters(), lr=self.critic_lr)
             self.baseline_loss_fn = nn.MSELoss()
             self.baseline_model.to(self.device)
 
-        self.debug_mode = False
         self.training_mode = True
         self.steps = 0
         self.buffer = deque(maxlen=self.buffer_max_length)
@@ -151,20 +137,11 @@ class DDPG_Agent:
 
     def get_action(self, observation):
         with torch.no_grad(): action = self.actor(observation.to(self.device))
-
-        # add noise only when interacting with environment in training mode
-        if self.training_mode:
-            cov = np.eye(self.num_actions, dtype=np.float32) * self.sigma**2
-            cov[~np.eye(self.num_actions, dtype=bool)] = np.float32(self.sigma**2 * self.rho)
-            noise = torch.tensor(self.rng.multivariate_normal(np.zeros(self.num_actions), cov), dtype=torch.float32)
-            # noise = torch.normal(torch.zeros(self.num_actions), self.sigma * torch.ones(self.num_actions))
-        else: noise = torch.zeros(self.num_actions)
+        if self.training_mode: noise = torch.normal(torch.zeros(self.num_actions), self.sigma * torch.ones(self.num_actions))
+        else: noise = torch.zeros(self.num_actions) # noise only when interacting with environment in training mode
         noise = noise.to(self.device)
         assert action.shape == noise.shape, str(action.shape) + str(noise.shape)
-
-         # when actions includes risk free asset and adding softmax to remove leverage / shortselling
-        if self.softmax: return F.softmax(action + noise, dim=-1)
-        # limit action to min/max position based on action_limit_value (from env)
+        if self.softmax: return F.softmax(action + noise, dim=-1) # when actions includes risk free asset and adding softmax to remove leverage / shortselling
         elif self.action_limit: return nn.Tanh()(action + noise) * self.action_limit_value
         else: return (action + noise)
 
@@ -173,7 +150,6 @@ class DDPG_Agent:
         self.add_to_replay_buffer(reward, observation, terminal)
         if self.training_condition(): self.train()
         if self.update_target_net_condition(): self.update_target_networks()
-        if self.sigma_decay and self.steps < self.sigma_steps: self.sigma += self.sigma_decay
 
     def update_target_networks(self):
         t = self.soft_param
@@ -202,46 +178,21 @@ class DDPG_Agent:
             if len(self.buffer) == self.buffer_max_length:
                 self.buffer_filled = True
         if not self.batch_in_buffer:
-            if len(self.buffer) >= self.batch_size: self.batch_in_buffer = True
+            if len(self.buffer) >= self.n_batches * self.batch_size: self.batch_in_buffer = True
 
-    def sample_batch(self):
-        if self.n_batches * self.batch_size > len(self.buffer):
-            return [torch.stack(i, dim=0) for i in [*zip(*self.buffer)]]
-        else:
-            return [torch.stack(i, dim=0) for i in [*zip(*random.sample(self.buffer, self.n_batches * self.batch_size))]]
+    def sample_batch(self): return [torch.stack(i, dim=0) for i in [*zip(*random.sample(self.buffer, self.n_batches * self.batch_size))]]
 
     def train(self):
-        start_time = time.time()
         current_states, actions, rewards, next_states, terminal_state = self.sample_batch()
         not_terminal = torch.logical_not(terminal_state)
-        self.time1 += time.time() - start_time
-
-        if self.n_batches * self.batch_size >= len(self.buffer):
-            start_time = time.time()
-            dataset = torch.utils.data.TensorDataset(current_states, actions, rewards, next_states, not_terminal)
-            dataloader = torch.utils.data.DataLoader(dataset, batch_size=self.batch_size, shuffle=True)
-            n_batches_trained = 0
-            while n_batches_trained < self.n_batches:
-                for current_states, actions, rewards, next_states, not_terminal in dataloader:
-                    self.train_batch(current_states, actions, rewards, next_states, not_terminal)
-                    n_batches_trained += 1
-                    if n_batches_trained >= self.n_batches: break
-            self.time2 += time.time() - start_time
-        else:
-            start_time = time.time()
-            current_states, actions, rewards, next_states, terminal_state = self.sample_batch()
-            not_terminal = torch.logical_not(terminal_state)
-            for i in range(self.n_batches):
-                start = i * self.batch_size
-                end = (i+1) * self.batch_size
-                self.train_batch(
-                    current_states[start:end],
-                    actions[start:end],
-                    rewards[start:end],
-                    next_states[start:end],
-                    not_terminal[start:end]
-                )
-            self.time3 += time.time() - start_time
+        for i in range(self.n_batches):
+            self.train_batch(
+                current_states[i*self.batch_size:(i+1)*self.batch_size],
+                actions[i*self.batch_size:(i+1)*self.batch_size],
+                rewards[i*self.batch_size:(i+1)*self.batch_size],
+                next_states[i*self.batch_size:(i+1)*self.batch_size],
+                not_terminal[i*self.batch_size:(i+1)*self.batch_size]
+            )
 
     def train_batch(self, current_states, actions, rewards, next_states, not_terminal):
         current_states, actions, rewards, next_states, not_terminal = self.to_device([current_states, actions, rewards, next_states, not_terminal])
@@ -261,7 +212,7 @@ class DDPG_Agent:
 
         loss = self.critic_loss_fn(targets, current_state_q)
         self.critic_optimizer.zero_grad()
-        loss.backward() # retain graph required if log_std trainable and outside of model
+        loss.backward()
         if self.clip_gradients: torch.nn.utils.clip_grad_value_(self.critic.parameters(), self.clip_value)
         self.critic_optimizer.step()
         if self.debug_mode: print('Critic loss:', loss.mean().item())
@@ -287,7 +238,7 @@ class DDPG_Agent:
         actions = self.actor(current_states) # No noise for calculate critic value for training actor
         q_values = self.critic(torch.cat([current_states, actions], dim=-1))
         advantages = self.calculate_advantages(q_values, current_states).to(self.device)
-        if self.debug_mode: print('Adv values:', advantages)
+        if self.debug_mode: print('Adv values:', advantages.mean().item())
         loss = -torch.mean(advantages)
         self.actor_optimizer.zero_grad()
         loss.backward()
@@ -310,8 +261,7 @@ class DDPG_Agent:
         else:
             advantages = q_values.copy()
 
-        if self.standardise: advantages = (advantages - advantages.mean()) / (torch.std(advantages) + 0.000001)
-
+        if self.standardise: advantages = (advantages - advantages.mean()) / (torch.std(advantages) + 0.0001)
         return advantages
 
     def to_device(self, list):
@@ -320,11 +270,3 @@ class DDPG_Agent:
             var = var.to(self.device)
             device_var.append(var)
         return device_var
-
-    def analyse_train_actor(self):
-        current_states, actions, _, _, _ = [torch.stack(i, dim=0) for i in [*zip(*random.sample(self.buffer, 32))]]
-        # not_terminal = torch.logical_not(terminal_state)
-        actions = self.actor(current_states) # No noise for calculate critic value for training actor
-        q_values = self.critic(torch.cat([current_states, actions], dim=-1))
-        advantages = self.calculate_advantages(q_values, current_states).to(self.device)
-        return advantages, actions

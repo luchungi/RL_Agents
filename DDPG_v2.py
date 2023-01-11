@@ -320,11 +320,3 @@ class DDPG_Agent:
             var = var.to(self.device)
             device_var.append(var)
         return device_var
-
-    def analyse_train_actor(self):
-        current_states, actions, _, _, _ = [torch.stack(i, dim=0) for i in [*zip(*random.sample(self.buffer, 32))]]
-        # not_terminal = torch.logical_not(terminal_state)
-        actions = self.actor(current_states) # No noise for calculate critic value for training actor
-        q_values = self.critic(torch.cat([current_states, actions], dim=-1))
-        advantages = self.calculate_advantages(q_values, current_states).to(self.device)
-        return advantages, actions
