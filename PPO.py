@@ -136,6 +136,7 @@ class PPO_Agent:
         else:
             batch_mean = self.actor(observation)
             batch_cov = torch.diag((2*self.log_std).exp()).repeat(batch_mean.shape[0], 1, 1).to(self.device)
+            # print(batch_mean.shape, batch_cov.shape) #(1,3) and (1,3,3)
             action_dist = torch.distributions.MultivariateNormal(batch_mean, covariance_matrix=batch_cov)
 
         if return_dist:
