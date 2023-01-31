@@ -308,7 +308,7 @@ class TD3_Agent:
     # Refer to DPG paper for proof of the deterministic policy gradient
     def train_actor(self, current_states):
         actions = self.actor(current_states) # No noise for calculate critic value for training actor
-        q_values = self.critic1(torch.cat([current_states, actions], dim=-1))
+        q_values = self.critic1(torch.cat([current_states, actions], dim=-1)).cpu()
         advantages = self.calculate_advantages(q_values, current_states).to(self.device)
         if self.debug_mode: print('Adv values:', advantages)
         loss = -torch.mean(advantages)
