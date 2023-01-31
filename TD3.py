@@ -290,6 +290,9 @@ class TD3_Agent:
 
         # train baseline
         if self.baseline:
+            # average return as baseline
+            # baseline = [torch.stack(i[2], dim=0) for i in [*zip(*self.buffer[-256:])]]
+
             with torch.no_grad():
                 next_state_v = self.baseline_model(next_states)
             baseline_targets = (rewards + self.discount * next_state_v * not_terminal)
