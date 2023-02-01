@@ -1,47 +1,34 @@
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-
-from collections import deque, namedtuple
 import random
 import numpy as np
 import copy
-import time
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from collections import deque
 
 class TD3_Agent:
     '''
-    Implementation of DDPG with actor-critic
-    - Determininistic policy with Gaussian noise added
-    - max buffer length controls the maximum length of the replay buffer in terms of steps
-    - train_steps controls # of steps between training iterations
-    - n_batches controls # of batches to train in each training iteration
-    - n_update_target_steps controls # of steps between soft updating of target networks
-    - soft_param controls speed of soft updating of target network
-    - sigma controls standard deviation of the noise added to action
-    - end_sigma controls the final value of sigma after sigma_steps
-    - noise_corr controls the correlation between noise added to actions (default is zero corr)
-    - the noise is only added during training mode
-    - clip_gradients controls whether to clip the gradient to [-clip_value, clip_value]
-    - softmax controls whether to use softmax on the action (post noise addition)
-    - baseline will train a value function based on state to calculate advantage and reduce variance
-    - difficult to implement GAE as it requires calculating the advantage for a full episode rollout
-      which is in conflict with the replay buffer and train during episode style
-    - standardise will normalise the advantage
-    - action limit will add a tanh layer to the output of the actor multiplied by the
-      action limit value i.e. action in range [-value, value]
-    - actor/critic/baseline models default to the PPO NN architecture for better comparison
+    Implementation of TD3
+    Clipped double Q learning where min of Q1 and Q2 is used for target
+    Gaussian noise is added to actions for robustness
+    Added baseline model to calculate advantage and reduce variance
+    - train_critic_steps: number of environment steps between each critic update
+    - train_actor_steps: number of environment steps between each actor update
+    Delayed policy updates means train_actor_steps should be larger than train_critic_steps (e.g. x2 as in paper)
+    - update_target_steps: number of environment steps between each target network soft update
+    - soft_param: soft update parameter
+    Refer to DDPG for other param descriptions
     '''
 
-    def __init__(self, num_actions, obs_size, actor_lr=0.001, critic_lr=0.001, discount=0.99, buffer_max_length=int(1e6),
-        batch_size=128, train_critic_steps=8, train_actor_steps=16, n_batches=1, update_target_steps=8,
-        baseline=True, standardise=True, softmax=False, action_limit=False, action_limit_value=None,
-        soft_param=0.005, sigma=0.1, end_sigma=0.1, sigma_steps=None,clip_gradients=False, clip_value=None,
-        noise_corr=0, actor=None, critic=None, baseline_model=None, device='cpu'
+    def __init__(self, num_actions, obs_size, actor_lr=0.001, critic_lr=0.001, discount=0.99,
+        buffer_max_length=int(1e6), batch_size=128,
+        train_critic_steps=8, train_actor_steps=16, n_batches=1, update_target_steps=8,
+        baseline=True, standardise=True, soft_param=0.005,
+        sigma=0.1, end_sigma=0.1, sigma_steps=None, noise_corr=0,
+        clip_gradients=False, clip_value=None,
+        actor=None, critic=None, baseline_model=None,
+        device='cpu'
     ):
-
-        self.time1 = 0
-        self.time2 = 0
-        self.time3 = 0
 
         self.num_actions = num_actions
         self.obs_size = obs_size
@@ -57,17 +44,11 @@ class TD3_Agent:
         self.soft_param = soft_param
         self.clip_gradients = clip_gradients
         self.clip_value = clip_value
-        self.device = device
-        self.rng = np.random.default_rng()
         self.baseline = baseline
         self.standardise = standardise
-        self.softmax = softmax
-        self.action_limit = action_limit
-        self.action_limit_value = action_limit_value
         self.rho = noise_corr
         self.rng = np.random.default_rng()
-        if self.softmax == True and self.action_limit == True:
-            raise Exception('Cannot use softmax with action limits')
+        self.device = device
 
         if actor:
             self.actor = actor
@@ -290,11 +271,7 @@ class TD3_Agent:
 
         # train baseline
         if self.baseline:
-            # average return as baseline
-            # baseline = [torch.stack(i[2], dim=0) for i in [*zip(*self.buffer[-256:])]]
-
-            with torch.no_grad():
-                next_state_v = self.baseline_model(next_states)
+            with torch.no_grad(): next_state_v = self.baseline_model(next_states)
             baseline_targets = (rewards + self.discount * next_state_v * not_terminal)
             baseline = self.baseline_model(current_states)
 
@@ -305,36 +282,29 @@ class TD3_Agent:
             self.baseline_optimizer.step()
             if self.debug_mode: print('Baseline loss:', baseline_loss.mean().item())
 
-    # Refer to DPG paper for proof of the deterministic policy gradient
     def train_actor(self, current_states):
         actions = self.actor(current_states) # No noise for calculate critic value for training actor
         q_values = self.critic1(torch.cat([current_states, actions], dim=-1)).cpu()
         advantages = self.calculate_advantages(q_values, current_states).to(self.device)
-        if self.debug_mode: print('Adv values:', advantages)
+
         loss = -torch.mean(advantages)
         self.actor_optimizer.zero_grad()
         loss.backward()
+
         if self.clip_gradients: torch.nn.utils.clip_grad_value_(self.actor.parameters(), self.clip_value)
         self.actor_optimizer.step()
 
     def calculate_advantages(self, q_values, obs=None):
-        # Computes advantages by (possibly) using GAE, or subtracting a baseline from the estimated Q values
-
         if self.baseline:
             with torch.no_grad(): values_unnormalized = self.baseline_model(obs).cpu()
-            ## ensure that the value predictions and q_values have the same dimensionality
-            ## to prevent silent broadcasting errors
             assert values_unnormalized.shape == q_values.shape, (values_unnormalized.shape, q_values.shape)
-            ## values were trained with standardized q_values, so ensure
-                ## that the predictions have the same mean and standard deviation as
-                ## the current batch of q_values
+            ## values were trained with standardized q_values -> ensure predictions have same mean & std as current batch of q_values
             values = values_unnormalized * torch.std(q_values) + q_values.mean()
             advantages = q_values - values
         else:
             advantages = q_values.copy()
 
         if self.standardise: advantages = (advantages - advantages.mean()) / (torch.std(advantages) + 0.000001)
-
         return advantages
 
     def to_device(self, list):
