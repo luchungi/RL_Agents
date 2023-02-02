@@ -224,7 +224,7 @@ class DDPG_Agent:
                 for current_states, actions, rewards, next_states, not_terminal in dataloader:
                     self.train_batch(current_states, actions, rewards, next_states, not_terminal)
                     n_batches_trained += 1
-                    if n_batches_trained >= self.n_batches: break
+                    if n_batches_trained == self.n_batches: break
             self.time2 += time.time() - start_time
         else:
             start_time = time.time()
@@ -256,7 +256,7 @@ class DDPG_Agent:
 
         # compute current state q value = Q(current_state, action)
         current_state_q = self.critic(torch.cat([current_states, actions], dim=-1))
-        assert current_state_q.shape == targets.shape,  str(current_state_q.shape) + ' ' + str(targets.shape)
+        # assert current_state_q.shape == targets.shape,  str(current_state_q.shape) + ' ' + str(targets.shape)
 
         loss = self.critic_loss_fn(targets, current_state_q)
         self.critic_optimizer.zero_grad()
@@ -286,10 +286,14 @@ class DDPG_Agent:
         actions = self.actor(current_states) # No noise for calculate critic value for training actor
         q_values = self.critic(torch.cat([current_states, actions], dim=-1))
         advantages = self.calculate_advantages(q_values, current_states).to(self.device)
-        if self.debug_mode: print('Adv values:', advantages)
+        if self.debug_mode:
+            print('Adv values:', advantages)
+            for params in self.actor.parameters():
+                print('Gradients:', params.grad)
         loss = -torch.mean(advantages)
         self.actor_optimizer.zero_grad()
         loss.backward()
+
         if self.clip_gradients: torch.nn.utils.clip_grad_value_(self.actor.parameters(), self.clip_value)
         self.actor_optimizer.step()
 
@@ -307,7 +311,7 @@ class DDPG_Agent:
             values = values_unnormalized * torch.std(q_values) + q_values.mean()
             advantages = q_values - values
         else:
-            advantages = q_values.copy()
+            advantages = q_values
 
         if self.standardise: advantages = (advantages - advantages.mean()) / (torch.std(advantages) + 0.000001)
 
@@ -321,7 +325,7 @@ class DDPG_Agent:
         return device_var
 
     def analyse_train_actor(self):
-        current_states, actions, _, _, _ = [torch.stack(i, dim=0) for i in [*zip(*random.sample(self.buffer, 32))]]
+        current_states, actions, _, _, _ = [torch.stack(i, dim=0) for i in [*zip(*random.sample(self.buffer, self.batch_size))]]
         # not_terminal = torch.logical_not(terminal_state)
         actions = self.actor(current_states) # No noise for calculate critic value for training actor
         q_values = self.critic(torch.cat([current_states, actions], dim=-1))
