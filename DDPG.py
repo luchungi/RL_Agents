@@ -56,16 +56,15 @@ class DDPG_Agent:
         self.clip_gradients = clip_gradients
         self.clip_value = clip_value
         self.device = device
-        self.rng = np.random.default_rng()
         self.baseline = baseline
         self.standardise = standardise
         self.softmax = softmax
         self.action_limit = action_limit
         self.action_limit_value = action_limit_value
-        self.rho = noise_corr
-        self.rng = np.random.default_rng()
         if self.softmax == True and self.action_limit == True:
             raise Exception('Cannot use softmax with action limits')
+        self.rho = noise_corr
+        self.rng = np.random.default_rng()
 
         if actor:
             self.actor = actor

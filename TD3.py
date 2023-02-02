@@ -24,6 +24,7 @@ class TD3_Agent:
         buffer_max_length=int(1e6), batch_size=128,
         train_critic_steps=8, train_actor_steps=16, n_batches=1, update_target_steps=8,
         baseline=True, standardise=True, soft_param=0.005,
+        softmax=False, action_limit=False, action_limit_value=None,
         sigma=0.1, end_sigma=0.1, sigma_steps=None, noise_corr=0,
         clip_gradients=False, clip_value=None,
         actor=None, critic=None, baseline_model=None,
@@ -46,6 +47,11 @@ class TD3_Agent:
         self.clip_value = clip_value
         self.baseline = baseline
         self.standardise = standardise
+        self.softmax = softmax
+        self.action_limit = action_limit
+        self.action_limit_value = action_limit_value
+        if self.softmax == True and self.action_limit == True:
+            raise Exception('Cannot use softmax with action limits')
         self.rho = noise_corr
         self.rng = np.random.default_rng()
         self.device = device
