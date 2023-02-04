@@ -61,8 +61,6 @@ class DDPG_Agent:
         self.softmax = softmax
         self.action_limit = action_limit
         self.action_limit_value = action_limit_value
-        if self.softmax == True and self.action_limit == True:
-            raise Exception('Cannot use softmax with action limits')
         self.rho = noise_corr
         self.rng = np.random.default_rng()
 
@@ -148,24 +146,31 @@ class DDPG_Agent:
         reward = torch.tensor([reward], dtype=torch.float32)
         if self.training_mode: self.train_mode_actions(reward, observation, True)
 
-    def get_action(self, observation):
-        with torch.no_grad(): action = self.actor(observation.to(self.device))
+    def get_action(self, observation, require_grad=False, target=False):
+        observation = observation.to(self.device)
+        if require_grad:
+            action = self.actor(observation)
+        else:
+            with torch.no_grad():
+                if target: action = self.target_actor(observation)
+                else: action = self.actor(observation)
 
         # add noise only when interacting with environment in training mode
-        if self.training_mode:
+        if (not require_grad) and (not target) and (self.training_mode):
             cov = np.eye(self.num_actions, dtype=np.float32) * self.sigma**2
             cov[~np.eye(self.num_actions, dtype=bool)] = np.float32(self.sigma**2 * self.rho)
             noise = torch.tensor(self.rng.multivariate_normal(np.zeros(self.num_actions), cov), dtype=torch.float32)
+            assert action.shape == noise.shape, f'action shape {action.shape} / noise shape {noise.shape} / require_grad {require_grad} / target {target}'
             # noise = torch.normal(torch.zeros(self.num_actions), self.sigma * torch.ones(self.num_actions))
-        else: noise = torch.zeros(self.num_actions)
-        noise = noise.to(self.device)
-        assert action.shape == noise.shape, str(action.shape) + str(noise.shape)
+            action += noise.to(self.device)
 
-         # when actions includes risk free asset and adding softmax to remove leverage / shortselling
-        if self.softmax: return F.softmax(action + noise, dim=-1)
+        # when actions includes risk free asset and adding softmax to remove leverage / shortselling
         # limit action to min/max position based on action_limit_value (from env)
-        elif self.action_limit: return nn.Tanh()(action + noise) * self.action_limit_value
-        else: return (action + noise)
+        # use in combination to remove shortselling but allow leverage
+        if self.softmax and self.action_limit: return nn.Sigmoid()(action) * self.action_limit_value
+        elif self.softmax: return nn.Softmax()(action, dim=-1)
+        elif self.action_limit: return nn.Tanh()(action) * self.action_limit_value
+        else: return action
 
     def train_mode_actions(self, reward, observation, terminal):
         self.steps += 1
@@ -250,7 +255,7 @@ class DDPG_Agent:
     def train_critic(self, current_states, actions, rewards, next_states, not_terminal):
         # compute targets = reward + gamma * target_q(next_state, action) where action = max(q(next_state)) i.e. double Q-learning
         with torch.no_grad():
-            next_actions = self.target_actor(next_states)
+            next_actions = self.get_action(next_states, target=True)
             next_state_q = self.target_critic(torch.cat([next_states, next_actions], dim=-1))
         targets = (rewards + self.discount * next_state_q * not_terminal)
 
@@ -283,7 +288,7 @@ class DDPG_Agent:
 
     # Refer to DPG paper for proof of the deterministic policy gradient
     def train_actor(self, current_states):
-        actions = self.actor(current_states) # No noise for calculate critic value for training actor
+        actions = self.get_action(current_states, require_grad=True)
         q_values = self.critic(torch.cat([current_states, actions], dim=-1))
         advantages = self.calculate_advantages(q_values, current_states).to(self.device)
         if self.debug_mode:
@@ -327,7 +332,7 @@ class DDPG_Agent:
     def analyse_train_actor(self):
         current_states, actions, _, _, _ = [torch.stack(i, dim=0) for i in [*zip(*random.sample(self.buffer, self.batch_size))]]
         # not_terminal = torch.logical_not(terminal_state)
-        actions = self.actor(current_states) # No noise for calculate critic value for training actor
+        actions = self.get_action(current_states, require_grad=True)
         q_values = self.critic(torch.cat([current_states, actions], dim=-1))
-        advantages = self.calculate_advantages(q_values, current_states).to(self.device)
-        return advantages, actions
+        advantages = self.calculate_advantages(q_values, current_states).detach().cpu().numpy()
+        return advantages, actions.detach().cpu().numpy()
