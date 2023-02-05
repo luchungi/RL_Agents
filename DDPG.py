@@ -44,26 +44,36 @@ class DDPG_Agent:
 
         self.num_actions = num_actions
         self.obs_size = obs_size
-        self.actor_lr = actor_lr
-        self.critic_lr = critic_lr
         self.discount = discount
-        self.buffer_max_length = buffer_max_length
         self.batch_size = batch_size
-        self.train_steps = train_steps
         self.n_batches = n_batches
+        self.train_steps = train_steps
         self.update_target_steps = update_target_steps
         self.soft_param = soft_param
         self.clip_gradients = clip_gradients
         self.clip_value = clip_value
         self.device = device
-        self.baseline = baseline
-        self.standardise = standardise
+
+        # leverage and shorting constraints
         self.softmax = softmax
         self.action_limit = action_limit
         self.action_limit_value = action_limit_value
-        self.rho = noise_corr
-        self.rng = np.random.default_rng()
 
+        # noise for exploration
+        self.sigma = sigma
+        self.rho = noise_corr
+        if end_sigma != self.sigma:
+            self.sigma_decay = (end_sigma - self.sigma) / sigma_steps
+            self.sigma_steps = sigma_steps
+        else: self.sigma_decay = None
+
+        # replay buffer
+        self.buffer_max_length = buffer_max_length
+        self.buffer = deque(maxlen=self.buffer_max_length)
+        self.buffer_filled = False                               # flag to indicate buffer is full
+        self.batch_in_buffer = False                            # flag to indicate if n_batches is in buffer
+
+        # actor and critic
         if actor:
             self.actor = actor
         else:
@@ -77,12 +87,7 @@ class DDPG_Agent:
         self.target_actor = copy.deepcopy(self.actor)
         self.actor.to(self.device)
         self.target_actor.to(self.device)
-        self.actor_optimizer = torch.optim.Adam(self.actor.parameters(), lr=self.actor_lr)
-        self.sigma = sigma
-        if end_sigma != self.sigma:
-            self.sigma_decay = (end_sigma - self.sigma) / sigma_steps
-            self.sigma_steps = sigma_steps
-        else: self.sigma_decay = None
+        self.actor_optimizer = torch.optim.Adam(self.actor.parameters(), lr=actor_lr)
 
         if critic:
             self.critic = critic
@@ -95,11 +100,14 @@ class DDPG_Agent:
                 nn.Linear(64, 1),
             )
         self.target_critic = copy.deepcopy(self.critic)
-        self.critic_optimizer = torch.optim.Adam(self.critic.parameters(), lr=self.critic_lr) #, weight_decay=0.01) # WEIGHT DECAY CAUSES LEARNING ISSUES WITH MOUNTAIN CAR
+        self.critic_optimizer = torch.optim.Adam(self.critic.parameters(), lr=critic_lr) #, weight_decay=0.01) # WEIGHT DECAY CAUSES LEARNING ISSUES WITH MOUNTAIN CAR
         self.critic.to(self.device)
         self.target_critic.to(self.device)
         self.critic_loss_fn = nn.MSELoss()
 
+        # baseline and advantage
+        self.baseline = baseline
+        self.standardise = standardise
         if self.baseline:
             if baseline_model:
                 self.baseline_model = baseline_model
@@ -111,16 +119,15 @@ class DDPG_Agent:
                     nn.Tanh(),
                     nn.Linear(64, 1)
                 )
-            self.baseline_optimizer = torch.optim.Adam(self.baseline_model.parameters(), lr=self.critic_lr)
+            self.baseline_optimizer = torch.optim.Adam(self.baseline_model.parameters(), lr=critic_lr)
             self.baseline_loss_fn = nn.MSELoss()
             self.baseline_model.to(self.device)
 
-        self.debug_mode = False
-        self.training_mode = True
-        self.steps = 0
-        self.buffer = deque(maxlen=self.buffer_max_length)
-        self.buffer_filled = False
-        self.batch_in_buffer = False
+        # defaults
+        self.debug_mode = False         # print debug info
+        self.training_mode = True       # flag to determine if training or testing
+        self.steps = 0                  # steps since initialisation
+        self.rng = np.random.default_rng()
 
     def agent_start(self, observation):
         observation = torch.tensor(observation, dtype=torch.float32)
@@ -156,20 +163,22 @@ class DDPG_Agent:
                 else: action = self.actor(observation)
 
         # add noise only when interacting with environment in training mode
+        # no noise for actor training
         if (not require_grad) and (not target) and (self.training_mode):
             cov = np.eye(self.num_actions, dtype=np.float32) * self.sigma**2
             cov[~np.eye(self.num_actions, dtype=bool)] = np.float32(self.sigma**2 * self.rho)
-            noise = torch.tensor(self.rng.multivariate_normal(np.zeros(self.num_actions), cov), dtype=torch.float32)
+            noise = self.rng.multivariate_normal(np.zeros(self.num_actions), cov)
+            noise = torch.tensor(noise, dtype=torch.float32).to(self.device)
             assert action.shape == noise.shape, f'action shape {action.shape} / noise shape {noise.shape} / require_grad {require_grad} / target {target}'
-            # noise = torch.normal(torch.zeros(self.num_actions), self.sigma * torch.ones(self.num_actions))
-            action += noise.to(self.device)
+        else:
+            noise = torch.zeros(self.num_actions).to(self.device)
 
         # when actions includes risk free asset and adding softmax to remove leverage / shortselling
         # limit action to min/max position based on action_limit_value (from env)
         # use in combination to remove shortselling but allow leverage
-        if self.softmax and self.action_limit: return nn.Sigmoid()(action) * self.action_limit_value
-        elif self.softmax: return nn.Softmax()(action, dim=-1)
-        elif self.action_limit: return nn.Tanh()(action) * self.action_limit_value
+        if self.softmax and self.action_limit: return torch.clamp(nn.Sigmoid()(action) * self.action_limit_value + noise, 0, self.action_limit_value)
+        elif self.softmax: return nn.Softmax()(nn.Softmax()(action, dim=-1) + noise)
+        elif self.action_limit: return torch.clamp(nn.Tanh()(action) * self.action_limit_value + noise, -self.action_limit_value, self.action_limit_value)
         else: return action
 
     def train_mode_actions(self, reward, observation, terminal):
@@ -233,8 +242,6 @@ class DDPG_Agent:
             self.time2 += time.time() - start_time
         else:
             start_time = time.time()
-            current_states, actions, rewards, next_states, terminal_state = self.sample_batch()
-            not_terminal = torch.logical_not(terminal_state)
             for i in range(self.n_batches):
                 start = i * self.batch_size
                 end = (i+1) * self.batch_size
@@ -255,7 +262,7 @@ class DDPG_Agent:
     def train_critic(self, current_states, actions, rewards, next_states, not_terminal):
         # compute targets = reward + gamma * target_q(next_state, action) where action = max(q(next_state)) i.e. double Q-learning
         with torch.no_grad():
-            next_actions = self.get_action(next_states, target=True)
+            next_actions = self.get_action(next_states, target=True) # no noise added in DDPG (only in TD3)
             next_state_q = self.target_critic(torch.cat([next_states, next_actions], dim=-1))
         targets = (rewards + self.discount * next_state_q * not_terminal)
 
@@ -288,7 +295,7 @@ class DDPG_Agent:
 
     # Refer to DPG paper for proof of the deterministic policy gradient
     def train_actor(self, current_states):
-        actions = self.get_action(current_states, require_grad=True)
+        actions = self.get_action(current_states, require_grad=True) # no noise for actor training
         q_values = self.critic(torch.cat([current_states, actions], dim=-1))
         advantages = self.calculate_advantages(q_values, current_states).to(self.device)
         if self.debug_mode:
