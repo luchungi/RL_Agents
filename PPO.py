@@ -219,7 +219,7 @@ class PPO_Agent:
             self.clip_ind.append(((d_ratios < 1 - self.clip_param) + (d_ratios > 1 + self.clip_param)))
             self.actor_losses.append(actor_loss.detach().cpu().numpy())
             self.critic_losses.append(critic_loss.detach().cpu().numpy())
-            self.entropies.append(entropy.detach().cpu().numpy())
+            if self.entropy_loss_beta > 0: self.entropies.append(entropy.detach().cpu().numpy())
             self.losses.append(loss.detach().cpu().numpy())
 
         self.optimizer.zero_grad()
@@ -264,7 +264,7 @@ class PPO_Agent:
             self.writer.add_scalar('Learning_rate',  self.optimizer.param_groups[0]['lr'], self.steps)
             self.writer.add_scalar('Actor_loss', np.mean(self.actor_losses), self.steps)
             self.writer.add_scalar('Critic_loss', np.mean(self.critic_losses), self.steps)
-            self.writer.add_scalar('Entropy_loss', np.mean(self.entropies), self.steps)
+            if self.entropy_loss_beta > 0: self.writer.add_scalar('Entropy_loss', np.mean(self.entropies), self.steps)
             self.writer.add_scalar('Total_loss', np.mean(self.losses), self.steps)
         return kl_div
 
