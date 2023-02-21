@@ -184,7 +184,7 @@ class AC_On_RG_Agent:
         if not self.discrete: self.log_std_optim.zero_grad()
         self.actor_optimizer.zero_grad()
         actor_loss.backward()
-        nn.utils.clip_grad_norm_(list(self.actor.parameters()), self.max_grad_norm)
+        if self.max_grad_norm is not None: nn.utils.clip_grad_norm_(list(self.actor.parameters()), self.max_grad_norm)
         self.actor_optimizer.step()
         if not self.discrete: self.log_std_optim.step()
 
@@ -197,7 +197,7 @@ class AC_On_RG_Agent:
 
         self.critic_optimizer.zero_grad()
         critic_loss.backward()
-        nn.utils.clip_grad_norm_(list(self.critic.parameters()), self.max_grad_norm)
+        if self.max_grad_norm is not None: nn.utils.clip_grad_norm_(list(self.critic.parameters()), self.max_grad_norm)
         self.critic_optimizer.step()
 
     def compute_gae_and_returns(self, critic_values, rewards, next_state_not_terminals):
