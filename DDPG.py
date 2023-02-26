@@ -2,11 +2,10 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from collections import deque, namedtuple
+from collections import deque
 import random
 import numpy as np
 import copy
-import time
 
 class DDPG_Agent:
     '''
@@ -31,16 +30,18 @@ class DDPG_Agent:
     - actor/critic/baseline models default to the PPO NN architecture for better comparison
     '''
 
-    def __init__(self, num_actions, obs_size, actor_lr=0.001, critic_lr=0.001, discount=0.99, buffer_max_length=int(1e6),
-        batch_size=128, train_steps=8, n_batches=1, update_target_steps=8,
-        baseline=True, standardise=True, softmax=False, action_limit=False, action_limit_value=None,
-        soft_param=0.005, sigma=0.1, end_sigma=0.1, sigma_steps=None,clip_gradients=False, clip_value=None,
-        noise_corr=0, actor=None, critic=None, baseline_model=None, device='cpu'
+    def __init__(self, num_actions, obs_size,
+        discount=0.99,
+        actor_lr=0.001, critic_lr=0.001, train_steps=8, update_target_steps=8, soft_param=0.005,
+        buffer_max_length=int(1e6), batch_size=128, n_batches=1,
+        baseline=False, standardise=False,
+        no_leverage=False, no_shorting=False, squash_action=False, action_limit=False, action_limit_value=None,
+        sigma=0.1, end_sigma=0.1, sigma_steps=None, noise_corr=0,
+        clip_gradients=False, clip_value=None,
+        actor=None, critic=None, baseline_model=None,
+        next_state_action=False,
+        device='cpu'
     ):
-
-        self.time1 = 0
-        self.time2 = 0
-        self.time3 = 0
 
         self.num_actions = num_actions
         self.obs_size = obs_size
@@ -54,8 +55,13 @@ class DDPG_Agent:
         self.clip_value = clip_value
         self.device = device
 
+        # for GBM project
+        self.next_state_action = next_state_action
+
         # leverage and shorting constraints
-        self.softmax = softmax
+        self.no_leverage = no_leverage
+        self.no_shorting = no_shorting
+        self.squash_action = squash_action
         self.action_limit = action_limit
         self.action_limit_value = action_limit_value
 
@@ -173,13 +179,16 @@ class DDPG_Agent:
         else:
             noise = torch.zeros(self.num_actions).to(self.device)
 
-        # when actions includes risk free asset and adding softmax to remove leverage / shortselling
-        # limit action to min/max position based on action_limit_value (from env)
-        # use in combination to remove shortselling but allow leverage
-        if self.softmax and self.action_limit: return torch.clamp(nn.Sigmoid()(action) * self.action_limit_value + noise, 0, self.action_limit_value)
-        elif self.softmax: return nn.Softmax()(nn.Softmax()(action, dim=-1) + noise)
-        elif self.action_limit: return torch.clamp(nn.Tanh()(action) * self.action_limit_value + noise, -self.action_limit_value, self.action_limit_value)
-        else: return action
+        # squash action uses tanh or softmax depending on whether leverage is allowed
+        # else clamp action to action_limit_value
+        if self.squash_action:
+            if self.no_shorting: action = torch.clamp(nn.Softmax()(action) * self.action_limit_value + noise, 0, self.action_limit_value)
+            else: action = torch.clamp(nn.Tanh()(action) * self.action_limit_value + noise, -self.action_limit_value, self.action_limit_value)
+        elif self.action_limit:
+            if self.no_shorting: action = torch.clamp(action + noise, 0, self.action_limit_value)
+            else: action = torch.clamp(action + noise, -self.action_limit_value, self.action_limit_value)
+        if self.no_leverage: action = nn.softmax()(action)
+        return action
 
     def train_mode_actions(self, reward, observation, terminal):
         self.steps += 1
@@ -224,13 +233,10 @@ class DDPG_Agent:
             return [torch.stack(i, dim=0) for i in [*zip(*random.sample(self.buffer, self.n_batches * self.batch_size))]]
 
     def train(self):
-        start_time = time.time()
         current_states, actions, rewards, next_states, terminal_state = self.sample_batch()
         not_terminal = torch.logical_not(terminal_state)
-        self.time1 += time.time() - start_time
 
         if self.n_batches * self.batch_size >= len(self.buffer):
-            start_time = time.time()
             dataset = torch.utils.data.TensorDataset(current_states, actions, rewards, next_states, not_terminal)
             dataloader = torch.utils.data.DataLoader(dataset, batch_size=self.batch_size, shuffle=True)
             n_batches_trained = 0
@@ -239,9 +245,7 @@ class DDPG_Agent:
                     self.train_batch(current_states, actions, rewards, next_states, not_terminal)
                     n_batches_trained += 1
                     if n_batches_trained == self.n_batches: break
-            self.time2 += time.time() - start_time
         else:
-            start_time = time.time()
             for i in range(self.n_batches):
                 start = i * self.batch_size
                 end = (i+1) * self.batch_size
@@ -252,7 +256,6 @@ class DDPG_Agent:
                     next_states[start:end],
                     not_terminal[start:end]
                 )
-            self.time3 += time.time() - start_time
 
     def train_batch(self, current_states, actions, rewards, next_states, not_terminal):
         current_states, actions, rewards, next_states, not_terminal = self.to_device([current_states, actions, rewards, next_states, not_terminal])
@@ -262,8 +265,11 @@ class DDPG_Agent:
     def train_critic(self, current_states, actions, rewards, next_states, not_terminal):
         # compute targets = reward + gamma * target_q(next_state, action) where action = max(q(next_state)) i.e. double Q-learning
         with torch.no_grad():
-            next_actions = self.get_action(next_states, target=True) # no noise added in DDPG (only in TD3)
-            next_state_q = self.target_critic(torch.cat([next_states, next_actions], dim=-1))
+            if self.next_state_action:
+                next_state_q = self.target_critic(torch.cat([next_states, actions], dim=-1))
+            else:
+                next_actions = self.get_action(next_states, target=True) # no noise added in DDPG (only in TD3)
+                next_state_q = self.target_critic(torch.cat([next_states, next_actions], dim=-1))
         targets = (rewards + self.discount * next_state_q * not_terminal)
 
         # compute current state q value = Q(current_state, action)
