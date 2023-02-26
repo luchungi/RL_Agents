@@ -344,7 +344,7 @@ class TD3_Agent:
             values = values_unnormalized * torch.std(q_values) + q_values.mean()
             advantages = q_values - values
         else:
-            advantages = q_values.copy()
+            advantages = q_values
 
         if self.standardise: advantages = (advantages - advantages.mean()) / (torch.std(advantages) + 0.000001)
         return advantages
