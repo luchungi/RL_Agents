@@ -21,16 +21,19 @@ class TD3_Agent:
     Refer to DDPG for other param descriptions
     '''
 
-    def __init__(self, num_actions, obs_size, actor_lr=0.001, critic_lr=0.001, discount=0.99,
-        buffer_max_length=int(1e6), batch_size=128,
+    def __init__(self, num_actions, obs_size,
+        discount=0.99,
+        actor_lr=0.001, critic_lr=0.001, learning_starts=128,
         train_critic_steps=8, train_actor_steps=16, actor_n_batches=1, critic_n_batches=1,
-        update_target_steps=8, learning_starts=128,
-        baseline=True, standardise=True, soft_param=0.005,
-        softmax=False, action_limit=False, action_limit_value=None,
+        update_target_steps=8, soft_param=0.005, target_noise_sigma=0.001, target_clip_value=0.005,
+        buffer_max_length=int(1e6), batch_size=128,
+        baseline=False, standardise=False,
+        no_leverage=False, no_shorting=False, squash_action=False, action_limit=False, action_limit_value=None,
         sigma=0.1, end_sigma=0.1, sigma_steps=None, noise_corr=0,
-        target_noise_sigma=0.001, target_clip_value=0.01,
         clip_gradients=False, clip_value=None,
         actor=None, critic=None, baseline_model=None,
+        next_state_action=False, truncate=False,
+        activation=nn.Tanh(),
         device='cpu'
     ):
 
@@ -48,8 +51,16 @@ class TD3_Agent:
         self.clip_value = clip_value
         self.device = device
 
+        # for GBM project
+        self.next_state_action = next_state_action
+        self.truncate = truncate
+        if truncate and next_state_action:
+            raise ValueError('Cannot truncate and next state action at the same time')
+
         # leverage and shorting constraints
-        self.softmax = softmax
+        self.no_leverage = no_leverage
+        self.no_shorting = no_shorting
+        self.squash_action = squash_action
         self.action_limit = action_limit
         self.action_limit_value = action_limit_value
 
@@ -78,9 +89,9 @@ class TD3_Agent:
         else:
             self.actor = nn.Sequential(
                 nn.Linear(self.obs_size, 64),
-                nn.Tanh(),
+                activation,
                 nn.Linear(64, 64),
-                nn.Tanh(),
+                activation,
                 nn.Linear(64, self.num_actions)
             )
         self.target_actor = copy.deepcopy(self.actor)
@@ -97,16 +108,16 @@ class TD3_Agent:
         else:
             self.critic1 = nn.Sequential(
                 nn.Linear(self.obs_size + self.num_actions, 64),
-                nn.Tanh(),
+                activation,
                 nn.Linear(64, 64),
-                nn.Tanh(),
+                activation,
                 nn.Linear(64, 1),
             )
             self.critic2 = nn.Sequential(
                 nn.Linear(self.obs_size + self.num_actions, 64),
-                nn.Tanh(),
+                activation,
                 nn.Linear(64, 64),
-                nn.Tanh(),
+                activation,
                 nn.Linear(64, 1),
             )
 
@@ -130,9 +141,9 @@ class TD3_Agent:
             else:
                 self.baseline_model = nn.Sequential(
                     nn.Linear(self.obs_size, 64),
-                    nn.Tanh(),
+                    activation,
                     nn.Linear(64, 64),
-                    nn.Tanh(),
+                    activation,
                     nn.Linear(64, 1)
                 )
             self.baseline_optimizer = torch.optim.Adam(self.baseline_model.parameters(), lr=critic_lr)
@@ -171,36 +182,34 @@ class TD3_Agent:
 
     def get_action(self, observation, require_grad=False, target=False):
         observation = observation.to(self.device)
-
-        if target:
-            # add noise for target smoothing policy regularization (see TD3 paper)
-            with torch.no_grad(): action = self.target_actor(observation)
-            noise = torch.normal(torch.zeros(self.num_actions), self.target_noise_sigma * torch.ones(self.num_actions)).to(self.device)
-            noise = torch.clamp(noise, -self.target_clip_value, self.target_clip_value).to(self.device)
+        if require_grad:
+            action = self.actor(observation)
         else:
-            if require_grad:
-                action = self.actor(observation)
-            else:
-                with torch.no_grad(): action = self.actor(observation)
+            with torch.no_grad():
+                if target: action = self.target_actor(observation)
+                else: action = self.actor(observation)
 
-            # add noise only when interacting with environment in training mode
-            # no noise for actor training
-            if (not require_grad) and (self.training_mode):
-                cov = np.eye(self.num_actions, dtype=np.float32) * self.sigma**2
-                cov[~np.eye(self.num_actions, dtype=bool)] = np.float32(self.sigma**2 * self.rho)
-                noise = self.rng.multivariate_normal(np.zeros(self.num_actions), cov)
-                noise = torch.tensor(noise, dtype=torch.float32).to(self.device)
-                assert action.shape == noise.shape, f'action shape {action.shape} / noise shape {noise.shape} / require_grad {require_grad} / target {target}'
-            else:
-                noise = torch.zeros(self.num_actions).to(self.device)
+        # add noise only when interacting with environment in training mode
+        # no noise for actor training
+        if (not require_grad) and (not target) and (self.training_mode):
+            cov = np.eye(self.num_actions, dtype=np.float32) * self.sigma**2
+            cov[~np.eye(self.num_actions, dtype=bool)] = np.float32(self.sigma**2 * self.rho)
+            noise = self.rng.multivariate_normal(np.zeros(self.num_actions), cov)
+            noise = torch.tensor(noise, dtype=torch.float32).to(self.device)
+            assert action.shape == noise.shape, f'action shape {action.shape} / noise shape {noise.shape} / require_grad {require_grad} / target {target}'
+        else:
+            noise = torch.zeros(self.num_actions).to(self.device)
 
-        # when actions includes risk free asset and adding softmax to remove leverage / shortselling
-        # limit action to min/max position based on action_limit_value (from env)
-        # use in combination to remove shortselling but allow leverage
-        if self.softmax and self.action_limit: return torch.clamp(nn.Sigmoid()(action) * self.action_limit_value + noise, 0, self.action_limit_value)
-        elif self.softmax: return nn.Softmax()(nn.Softmax()(action, dim=-1) + noise)
-        elif self.action_limit: return torch.clamp(nn.Tanh()(action) * self.action_limit_value + noise, -self.action_limit_value, self.action_limit_value)
-        else: return action
+        # squash action uses tanh or softmax depending on whether leverage is allowed
+        # else clamp action to action_limit_value
+        if self.squash_action:
+            if self.no_shorting: action = torch.clamp(nn.Softmax()(action) * self.action_limit_value + noise, 0, self.action_limit_value)
+            else: action = torch.clamp(nn.Tanh()(action) * self.action_limit_value + noise, -self.action_limit_value, self.action_limit_value)
+        elif self.action_limit:
+            if self.no_shorting: action = torch.clamp(action + noise, 0, self.action_limit_value)
+            else: action = torch.clamp(action + noise, -self.action_limit_value, self.action_limit_value)
+        if self.no_leverage: action = nn.softmax()(action)
+        return action
 
     def train_mode_actions(self, reward, observation, terminal):
         self.steps += 1
@@ -282,12 +291,23 @@ class TD3_Agent:
     def train_critic(self, current_states, actions, rewards, next_states, not_terminal):
         # clipped double Q-learning
         with torch.no_grad():
-            next_actions = self.get_action(next_states, target=True)
-            next_state_q = torch.minimum(
-                self.target_critic1(torch.cat([next_states, next_actions], dim=-1)),
-                self.target_critic2(torch.cat([next_states, next_actions], dim=-1))
-            )
-        targets = (rewards + self.discount * next_state_q * not_terminal)
+            if self.next_state_action:
+                next_state_q = (self.target_critic1(torch.cat([next_states, actions], dim=-1)) +
+                    self.target_critic2(torch.cat([next_states, actions], dim=-1))) / 2
+                # targets = (1-self.discount) * rewards + self.discount * next_state_q * not_terminal
+                targets = (1-self.discount) * rewards + self.discount * next_state_q
+                # targets = rewards + self.discount * next_state_q * not_terminal
+                # targets = rewards + self.discount * next_state_q
+
+            elif self.truncate:
+                targets = rewards
+            else:
+                next_actions = self.get_action(next_states, target=True)
+                next_state_q = torch.minimum(
+                    self.target_critic1(torch.cat([next_states, next_actions], dim=-1)),
+                    self.target_critic2(torch.cat([next_states, next_actions], dim=-1))
+                )
+                targets = (rewards + self.discount * next_state_q * not_terminal)
 
         # compute current state q value = Q(current_state, action)
         current_state_q1 = self.critic1(torch.cat([current_states, actions], dim=-1))

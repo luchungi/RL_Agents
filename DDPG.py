@@ -39,7 +39,8 @@ class DDPG_Agent:
         sigma=0.1, end_sigma=0.1, sigma_steps=None, noise_corr=0,
         clip_gradients=False, clip_value=None,
         actor=None, critic=None, baseline_model=None,
-        next_state_action=False,
+        next_state_action=False, truncate=False,
+        activation=nn.Tanh(),
         device='cpu'
     ):
 
@@ -57,6 +58,9 @@ class DDPG_Agent:
 
         # for GBM project
         self.next_state_action = next_state_action
+        self.truncate = truncate
+        if truncate and next_state_action:
+            raise ValueError('Cannot truncate and next state action at the same time')
 
         # leverage and shorting constraints
         self.no_leverage = no_leverage
@@ -85,9 +89,9 @@ class DDPG_Agent:
         else:
             self.actor = nn.Sequential(
                 nn.Linear(self.obs_size, 64),
-                nn.Tanh(),
+                activation,
                 nn.Linear(64, 64),
-                nn.Tanh(),
+                activation,
                 nn.Linear(64, self.num_actions)
             )
         self.target_actor = copy.deepcopy(self.actor)
@@ -100,9 +104,9 @@ class DDPG_Agent:
         else:
             self.critic = nn.Sequential(
                 nn.Linear(self.obs_size + self.num_actions, 64),
-                nn.Tanh(),
+                activation,
                 nn.Linear(64, 64),
-                nn.Tanh(),
+                activation,
                 nn.Linear(64, 1),
             )
         self.target_critic = copy.deepcopy(self.critic)
@@ -120,9 +124,9 @@ class DDPG_Agent:
             else:
                 self.baseline_model = nn.Sequential(
                     nn.Linear(self.obs_size, 64),
-                    nn.Tanh(),
+                    activation,
                     nn.Linear(64, 64),
-                    nn.Tanh(),
+                    activation,
                     nn.Linear(64, 1)
                 )
             self.baseline_optimizer = torch.optim.Adam(self.baseline_model.parameters(), lr=critic_lr)
@@ -266,11 +270,23 @@ class DDPG_Agent:
         # compute targets = reward + gamma * target_q(next_state, action) where action = max(q(next_state)) i.e. double Q-learning
         with torch.no_grad():
             if self.next_state_action:
-                next_state_q = self.target_critic(torch.cat([next_states, actions], dim=-1))
+                next_state_q = self.target_critic(torch.cat([current_states, actions], dim=-1))
+                # targets = (1-self.discount) * rewards + self.discount * next_state_q * not_terminal
+                # targets = (1-self.discount) * rewards + self.discount * next_state_q
+                # targets = rewards + self.discount * next_state_q * not_terminal
+                # targets = rewards + self.discount * next_state_q
+
+            elif self.truncate:
+                if self.baseline: b = self.baseline_model(current_states)
+                else: b = 0.
+                q = self.target_critic(torch.cat([current_states, actions], dim=-1))
+                targets = (rewards - b) * (1-self.discount) + self.discount * q
+                # try minus baseline based on 1. state 2. actions
+                # standardize
             else:
                 next_actions = self.get_action(next_states, target=True) # no noise added in DDPG (only in TD3)
                 next_state_q = self.target_critic(torch.cat([next_states, next_actions], dim=-1))
-        targets = (rewards + self.discount * next_state_q * not_terminal)
+                targets = rewards + self.discount * next_state_q * not_terminal
 
         # compute current state q value = Q(current_state, action)
         current_state_q = self.critic(torch.cat([current_states, actions], dim=-1))
@@ -317,23 +333,24 @@ class DDPG_Agent:
 
     def calculate_advantages(self, q_values, obs=None):
         # Computes advantages by (possibly) using GAE, or subtracting a baseline from the estimated Q values
+        return q_values
 
-        if self.baseline:
-            with torch.no_grad(): values_unnormalized = self.baseline_model(obs).cpu()
-            ## ensure that the value predictions and q_values have the same dimensionality
-            ## to prevent silent broadcasting errors
-            assert values_unnormalized.shape == q_values.shape, (values_unnormalized.shape, q_values.shape)
-            ## values were trained with standardized q_values, so ensure
-                ## that the predictions have the same mean and standard deviation as
-                ## the current batch of q_values
-            values = values_unnormalized * torch.std(q_values) + q_values.mean()
-            advantages = q_values - values
-        else:
-            advantages = q_values
+        # if self.baseline:
+        #     with torch.no_grad(): values_unnormalized = self.baseline_model(obs).cpu()
+        #     ## ensure that the value predictions and q_values have the same dimensionality
+        #     ## to prevent silent broadcasting errors
+        #     assert values_unnormalized.shape == q_values.shape, (values_unnormalized.shape, q_values.shape)
+        #     ## values were trained with standardized q_values, so ensure
+        #         ## that the predictions have the same mean and standard deviation as
+        #         ## the current batch of q_values
+        #     values = values_unnormalized * torch.std(q_values) + q_values.mean()
+        #     advantages = q_values - values
+        # else:
+        #     advantages = q_values
 
-        if self.standardise: advantages = (advantages - advantages.mean()) / (torch.std(advantages) + 0.000001)
+        # if self.standardise: advantages = (advantages - advantages.mean()) / (torch.std(advantages) + 0.000001)
 
-        return advantages
+        # return advantages
 
     def to_device(self, list):
         device_var = []
