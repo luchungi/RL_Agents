@@ -18,10 +18,10 @@ def beta_nll_loss_fn(beta):
             high weight on low error points and ‘1‘ to an equal weighting.
         :returns: Loss per batch element of shape B
         """
-        loss = 0.5 * ((target - mean) ** 2 / variance + variance.log())
+        loss = nn.GaussianNLLLoss(reduction='none')(target, mean, variance)
         if beta > 0:
             loss = loss * variance.detach() ** beta
-        return loss.sum(dim=-1)
+        return loss.mean(dim=-1)
     return beta_nll_loss
 
 class Critic(nn.Module):
@@ -94,6 +94,7 @@ class DDPG_Agent:
         self.clip_gradients = clip_gradients
         self.clip_value = clip_value
         self.device = device
+        self.beta = beta
 
         # for GBM project
         self.next_state_action = next_state_action
@@ -146,7 +147,7 @@ class DDPG_Agent:
         self.critic_optimizer = torch.optim.Adam(self.critic.parameters(), lr=critic_lr) #, weight_decay=0.01) # WEIGHT DECAY CAUSES LEARNING ISSUES WITH MOUNTAIN CAR
         self.critic.to(self.device)
         self.target_critic.to(self.device)
-        self.critic_loss_fn = beta_nll_loss_fn(beta)
+        self.critic_loss_fn = nn.GaussianNLLLoss(reduction='none')
 
         # baseline and advantage
         self.baseline = baseline
@@ -327,6 +328,8 @@ class DDPG_Agent:
         # assert current_state_q.shape == targets.shape,  str(current_state_q.shape) + ' ' + str(targets.shape)
 
         loss = self.critic_loss_fn(targets, current_state_q[0], current_state_q[1])
+        if self.beta > 0:
+            loss = (loss * current_state_q[1].detach() ** self.beta).mean()
         self.critic_optimizer.zero_grad()
         loss.backward() # retain graph required if log_std trainable and outside of model
         if self.clip_gradients: torch.nn.utils.clip_grad_value_(self.critic.parameters(), self.clip_value)
