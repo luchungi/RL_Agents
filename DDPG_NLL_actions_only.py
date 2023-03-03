@@ -1,28 +1,10 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
 from collections import deque
 import random
 import numpy as np
 import copy
-
-def beta_nll_loss_fn(beta):
-    def beta_nll_loss(target, mean, variance):
-        """Compute beta-NLL loss
-        :param mean: Predicted mean of shape B x D
-        :param variance: Predicted variance of shape B x D
-        :param target: Target of shape B x D
-        :param beta: Parameter from range [0, 1] controlling relative
-            weighting between data points, where ‘0‘ corresponds to
-            high weight on low error points and ‘1‘ to an equal weighting.
-        :returns: Loss per batch element of shape B
-        """
-        loss = 0.5 * ((target - mean) ** 2 / variance + variance.log())
-        if beta > 0:
-            loss = loss * variance.detach() ** beta
-        return loss.sum(dim=-1)
-    return beta_nll_loss
 
 class Critic(nn.Module):
     def __init__(self, obs_size, activation=nn.Tanh()):
@@ -31,6 +13,8 @@ class Critic(nn.Module):
             nn.Linear(obs_size, 32),
             activation,
             nn.Linear(32, 64),
+            activation,
+            nn.Linear(64, 64),
             activation,
             nn.Linear(64, 32),
             activation,
@@ -329,7 +313,7 @@ class DDPG_Agent:
 
         loss = self.critic_loss_fn(targets, current_state_q[0], current_state_q[1])
         if self.beta > 0:
-            loss = (loss * current_state_q[1].detach() ** self.beta).mean()
+            loss = (loss * torch.pow(current_state_q[1].detach(), self.beta)).mean()
         self.critic_optimizer.zero_grad()
         loss.backward() # retain graph required if log_std trainable and outside of model
         if self.clip_gradients: torch.nn.utils.clip_grad_value_(self.critic.parameters(), self.clip_value)
