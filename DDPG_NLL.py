@@ -320,7 +320,8 @@ class DDPG_Agent:
                 # standardize
             else:
                 next_actions = self.get_action(next_states, target=True) # no noise added in DDPG (only in TD3)
-                next_state_q = self.target_critic(torch.cat([next_states, next_actions], dim=-1))
+                with torch.no_grad(): next_state_q = self.target_critic(torch.cat([next_states, next_actions], dim=-1))[0]
+                # print(rewards.shape, next_state_q.shape, not_terminal.shape)
                 targets = rewards + self.discount * next_state_q * not_terminal
 
         # compute current state q value = Q(current_state, action)
